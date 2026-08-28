@@ -33,7 +33,7 @@ final class CameraStudioModel: ObservableObject {
     @Published var errorMessage: String?
 
     private let mixer = MediaMixer()
-    private var session: (any StreamSession)?
+    private var session: (any Session)?
     private var recorder: StreamRecorder?
     private weak var previewView: MTHKView?
     private var currentPosition: AVCaptureDevice.Position = .back
@@ -280,9 +280,11 @@ final class CameraStudioModel: ObservableObject {
             try? await session.close()
         }
 
-        let newSession = try await StreamSessionBuilderFactory.shared.make(url)
+        guard let newSession = try await SessionBuilderFactory.shared.make(url)
             .setMode(.publish)
-            .build()
+            .build() else {
+            throw StudioError.sessionUnavailable
+        }
         session = newSession
         preparedURL = url
         try await applyEncodingSettings(configuration)
