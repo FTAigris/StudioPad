@@ -35,7 +35,6 @@ final class CameraStudioModel: ObservableObject {
     private let mixer = MediaMixer()
     private var session: (any Session)?
     private var recorder: StreamRecorder?
-    private weak var previewView: MTHKView?
     private var currentPosition: AVCaptureDevice.Position = .back
     private var isPrepared = false
     private var preparedURL: URL?
@@ -44,8 +43,11 @@ final class CameraStudioModel: ObservableObject {
     var canStart: Bool { status == .idle }
 
     func attachPreview(_ view: MTHKView) {
-        previewView = view
         Task { await mixer.addOutput(view) }
+    }
+
+    func detachPreview(_ view: MTHKView) {
+        Task { await mixer.removeOutput(view) }
     }
 
     func prepare(using configuration: StreamConfiguration) async {
@@ -138,13 +140,27 @@ final class CameraStudioModel: ObservableObject {
     }
 
     func toggleMute() {
+        setMicrophoneMuted(!isMuted)
+    }
+
+    func setMicrophoneMuted(_ muted: Bool) {
+        isMuted = muted
         Task {
             var settings = await mixer.audioMixerSettings
             var track = settings.tracks[0] ?? .init()
-            track.isMuted = !isMuted
+            track.isMuted = muted
             settings.tracks[0] = track
             await mixer.setAudioMixerSettings(settings)
-            isMuted.toggle()
+        }
+    }
+
+    func setMicrophoneVolume(_ volume: Float) {
+        Task {
+            var settings = await mixer.audioMixerSettings
+            var track = settings.tracks[0] ?? .init()
+            track.volume = min(max(volume, 0), 1)
+            settings.tracks[0] = track
+            await mixer.setAudioMixerSettings(settings)
         }
     }
 
