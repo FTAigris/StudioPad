@@ -34,10 +34,26 @@ jobs:
           -scheme StudioPad
           -configuration Release
           -sdk iphoneos
+          -quiet
           -derivedDataPath "$RUNNER_TEMP/DerivedData"
           CODE_SIGNING_ALLOWED=NO
           CODE_SIGNING_REQUIRED=NO
           build
+
+      - name: Validar los permisos y las extensiones
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/StudioPad.app"
+          PLIST_BUDDY=/usr/libexec/PlistBuddy
+          "$PLIST_BUDDY" -c "Print :NSCameraUsageDescription" "$APP_PATH/Info.plist"
+          "$PLIST_BUDDY" -c "Print :NSMicrophoneUsageDescription" "$APP_PATH/Info.plist"
+          "$PLIST_BUDDY" -c "Print :NSExtension:NSExtensionPointIdentifier" \
+            "$APP_PATH/PlugIns/ScreenBroadcast.appex/Info.plist"
+          "$PLIST_BUDDY" -c "Print :NSExtension:NSExtensionAttributes:RPBroadcastProcessMode" \
+            "$APP_PATH/PlugIns/ScreenBroadcast.appex/Info.plist"
+          "$PLIST_BUDDY" -c "Print :NSExtension:NSExtensionPointIdentifier" \
+            "$APP_PATH/PlugIns/BroadcastSetup.appex/Info.plist"
 
       - name: Empaquetar el IPA
         shell: bash
