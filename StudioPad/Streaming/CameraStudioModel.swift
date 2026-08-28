@@ -200,7 +200,6 @@ final class CameraStudioModel: ObservableObject {
             self.recorder = nil
             isRecording = false
 
-            guard let fileURL else { return }
             let authorization = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
             guard authorization == .authorized || authorization == .limited else {
                 throw StudioError.photoPermissionDenied
