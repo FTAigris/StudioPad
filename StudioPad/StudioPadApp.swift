@@ -5,6 +5,7 @@ import SwiftUI
 @main
 struct StudioPadApp: App {
     @StateObject private var configuration = StreamConfiguration()
+    @StateObject private var studio = StudioStore.shared
     @State private var isReady = false
 
     var body: some Scene {
@@ -13,6 +14,7 @@ struct StudioPadApp: App {
                 if isReady {
                     RootView()
                         .environmentObject(configuration)
+                        .environmentObject(studio)
                 } else {
                     LaunchView()
                 }
