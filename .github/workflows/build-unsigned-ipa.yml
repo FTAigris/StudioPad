@@ -1,0 +1,58 @@
+name: Crear IPA sin firma
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Descargar el proyecto
+        uses: actions/checkout@v4
+
+      - name: Instalar XcodeGen
+        run: brew install xcodegen
+
+      - name: Generar el proyecto de Xcode
+        run: xcodegen generate --spec project.yml
+
+      - name: Resolver las dependencias
+        run: >-
+          xcodebuild
+          -project StudioPad.xcodeproj
+          -scheme StudioPad
+          -resolvePackageDependencies
+
+      - name: Compilar para iPad sin firma
+        run: >-
+          xcodebuild
+          -project StudioPad.xcodeproj
+          -scheme StudioPad
+          -configuration Release
+          -sdk iphoneos
+          -derivedDataPath "$RUNNER_TEMP/DerivedData"
+          CODE_SIGNING_ALLOWED=NO
+          CODE_SIGNING_REQUIRED=NO
+          build
+
+      - name: Empaquetar el IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/StudioPad.app"
+          test -d "$APP_PATH"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/StudioPad.app"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry "$GITHUB_WORKSPACE/StudioPad-unsigned.ipa" Payload
+
+      - name: Guardar el IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: StudioPad-unsigned-ipa
+          path: StudioPad-unsigned.ipa
+          retention-days: 7
