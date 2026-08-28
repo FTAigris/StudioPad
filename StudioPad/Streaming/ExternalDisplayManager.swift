@@ -90,6 +90,7 @@ final class ExternalDisplaySceneDelegate: UIResponder, UIWindowSceneDelegate {
         let content = ExternalProgramView(sessionID: sessionID)
             .environmentObject(StudioStore.shared)
             .environmentObject(ExternalDisplayManager.shared)
+            .environmentObject(StreamConfiguration.shared)
         let window = UIWindow(windowScene: windowScene)
         window.rootViewController = UIHostingController(rootView: content)
         window.backgroundColor = .black

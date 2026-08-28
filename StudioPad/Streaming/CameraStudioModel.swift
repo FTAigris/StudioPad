@@ -1,6 +1,7 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Combine
 import HaishinKit
+import ImageIO
 import Photos
 import RTMPHaishinKit
 import UIKit
@@ -32,22 +33,31 @@ final class CameraStudioModel: ObservableObject {
     @Published private(set) var cameraLabel = "Trasera"
     @Published var errorMessage: String?
 
-    private let mixer = MediaMixer()
+    private let captureMixer = MediaMixer()
+    private let programMixer = MediaMixer(captureSessionMode: .manual)
+    private lazy var programBridge = ProgramMixerBridge(target: programMixer)
     private var session: (any Session)?
     private var recorder: StreamRecorder?
     private var currentPosition: AVCaptureDevice.Position = .back
     private var isPrepared = false
     private var preparedURL: URL?
+    private var outputSize = CGSize(width: 1920, height: 1080)
+    private var currentProgramScene: StudioScene?
+    private var hasExternalOutput = false
+    @ScreenActor private var activeProgramObjects: [ScreenObject] = []
+    @ScreenActor private var imageGalleryStates: [ProgramImageGalleryState] = []
+    @ScreenActor private var mediaStates: [ProgramMediaState] = []
+    @ScreenActor private var programAnimationTask: Task<Void, Never>?
 
     var isLive: Bool { status == .live }
     var canStart: Bool { status == .idle }
 
     func attachPreview(_ view: MTHKView) {
-        Task { await mixer.addOutput(view) }
+        Task { await captureMixer.addOutput(view) }
     }
 
     func detachPreview(_ view: MTHKView) {
-        Task { await mixer.removeOutput(view) }
+        Task { await captureMixer.removeOutput(view) }
     }
 
     func prepare(using configuration: StreamConfiguration) async {
@@ -59,8 +69,11 @@ final class CameraStudioModel: ObservableObject {
             try configureAudioSession()
             try await attachDevices()
             try await configureVideo(using: configuration)
-            await configureCanvas()
-            await mixer.startRunning()
+            outputSize = configuration.outputSize
+            await configureCanvas(size: outputSize)
+            await captureMixer.addOutput(programBridge)
+            await programMixer.startRunning()
+            await captureMixer.startRunning()
             isPrepared = true
             status = .idle
         } catch {
@@ -93,8 +106,8 @@ final class CameraStudioModel: ObservableObject {
                 try await session.connect {
                     // HaishinKit reports transport failures through the session state.
                 }
-                UIApplication.shared.isIdleTimerDisabled = true
                 status = .live
+                refreshIdleTimerPolicy()
             } catch {
                 errorMessage = friendlyMessage(for: error)
                 status = .idle
@@ -110,8 +123,8 @@ final class CameraStudioModel: ObservableObject {
             } catch {
                 errorMessage = friendlyMessage(for: error)
             }
-            UIApplication.shared.isIdleTimerDisabled = false
             status = .idle
+            refreshIdleTimerPolicy()
         }
     }
 
@@ -128,7 +141,7 @@ final class CameraStudioModel: ObservableObject {
             }
 
             do {
-                try await mixer.attachVideo(device) { unit in
+                try await captureMixer.attachVideo(device) { unit in
                     unit.isVideoMirrored = nextPosition == .front
                 }
                 currentPosition = nextPosition
@@ -146,21 +159,21 @@ final class CameraStudioModel: ObservableObject {
     func setMicrophoneMuted(_ muted: Bool) {
         isMuted = muted
         Task {
-            var settings = await mixer.audioMixerSettings
+            var settings = await captureMixer.audioMixerSettings
             var track = settings.tracks[0] ?? .init()
             track.isMuted = muted
             settings.tracks[0] = track
-            await mixer.setAudioMixerSettings(settings)
+            await captureMixer.setAudioMixerSettings(settings)
         }
     }
 
     func setMicrophoneVolume(_ volume: Float) {
         Task {
-            var settings = await mixer.audioMixerSettings
+            var settings = await captureMixer.audioMixerSettings
             var track = settings.tracks[0] ?? .init()
             track.volume = min(max(volume, 0), 1)
             settings.tracks[0] = track
-            await mixer.setAudioMixerSettings(settings)
+            await captureMixer.setAudioMixerSettings(settings)
         }
     }
 
@@ -172,6 +185,33 @@ final class CameraStudioModel: ObservableObject {
         }
     }
 
+    func updateOutputConfiguration(using configuration: StreamConfiguration) {
+        let newSize = configuration.outputSize
+        let sizeChanged = newSize != outputSize
+        outputSize = newSize
+        let scene = currentProgramScene
+        Task {
+            try? await captureMixer.setFrameRate(Float64(configuration.framesPerSecond))
+            try? await programMixer.setFrameRate(Float64(configuration.framesPerSecond))
+            if sizeChanged {
+                await configureCanvas(size: newSize)
+                await rebuildProgramScene(scene, size: newSize)
+            }
+            try? await applyEncodingSettings(configuration)
+        }
+    }
+
+    func updateProgramScene(_ scene: StudioScene?) {
+        currentProgramScene = scene
+        let size = outputSize
+        Task { await rebuildProgramScene(scene, size: size) }
+    }
+
+    func setExternalOutputActive(_ active: Bool) {
+        hasExternalOutput = active
+        refreshIdleTimerPolicy()
+    }
+
     func shutdown() {
         Task {
             if isRecording {
@@ -179,14 +219,17 @@ final class CameraStudioModel: ObservableObject {
             }
             if let session {
                 try? await session.close()
-                await mixer.removeOutput(session.stream)
+                await programMixer.removeOutput(session.stream)
             }
             session = nil
             preparedURL = nil
-            await mixer.stopRunning()
-            UIApplication.shared.isIdleTimerDisabled = false
+            await clearProgramObjects()
+            await captureMixer.removeOutput(programBridge)
+            await captureMixer.stopRunning()
+            await programMixer.stopRunning()
             status = .idle
             isPrepared = false
+            refreshIdleTimerPolicy()
         }
     }
 
@@ -194,10 +237,11 @@ final class CameraStudioModel: ObservableObject {
         Task {
             do {
                 let recorder = StreamRecorder()
-                await mixer.addOutput(recorder)
+                await programMixer.addOutput(recorder)
                 try await recorder.startRecording()
                 self.recorder = recorder
                 isRecording = true
+                refreshIdleTimerPolicy()
             } catch {
                 errorMessage = friendlyMessage(for: error)
             }
@@ -212,9 +256,10 @@ final class CameraStudioModel: ObservableObject {
         guard let recorder else { return }
         do {
             let fileURL = try await recorder.stopRecording()
-            await mixer.removeOutput(recorder)
+            await programMixer.removeOutput(recorder)
             self.recorder = nil
             isRecording = false
+            refreshIdleTimerPolicy()
 
             let authorization = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
             guard authorization == .authorized || authorization == .limited else {
@@ -228,6 +273,7 @@ final class CameraStudioModel: ObservableObject {
         } catch {
             errorMessage = friendlyMessage(for: error)
             isRecording = false
+            refreshIdleTimerPolicy()
         }
     }
 
@@ -268,30 +314,41 @@ final class CameraStudioModel: ObservableObject {
             throw StudioError.microphoneUnavailable
         }
 
-        try await mixer.attachVideo(camera) { unit in
+        await captureMixer.configuration { session in
+            if session.isMultitaskingCameraAccessSupported {
+                session.isMultitaskingCameraAccessEnabled = true
+            }
+        }
+
+        try await captureMixer.attachVideo(camera) { unit in
             unit.isVideoMirrored = false
         }
-        try await mixer.attachAudio(microphone)
+        try await captureMixer.attachAudio(microphone)
     }
 
     private func configureVideo(using configuration: StreamConfiguration) async throws {
-        try await mixer.setFrameRate(Float64(configuration.framesPerSecond))
-        await mixer.setVideoOrientation(.landscapeRight)
+        try await captureMixer.setFrameRate(Float64(configuration.framesPerSecond))
+        try await programMixer.setFrameRate(Float64(configuration.framesPerSecond))
+        await captureMixer.setVideoOrientation(.landscapeRight)
 
-        var mixerSettings = await mixer.videoMixerSettings
-        mixerSettings.mode = .offscreen
-        await mixer.setVideoMixerSettings(mixerSettings)
+        var captureSettings = await captureMixer.videoMixerSettings
+        captureSettings.mode = .passthrough
+        await captureMixer.setVideoMixerSettings(captureSettings)
+
+        var programSettings = await programMixer.videoMixerSettings
+        programSettings.mode = .offscreen
+        await programMixer.setVideoMixerSettings(programSettings)
     }
 
     @ScreenActor
-    private func configureCanvas() async {
-        await mixer.screen.size = CGSize(width: 1280, height: 720)
-        await mixer.screen.backgroundColor = UIColor.black.cgColor
+    private func configureCanvas(size: CGSize) async {
+        await programMixer.screen.size = size
+        await programMixer.screen.backgroundColor = UIColor.black.cgColor
     }
 
     private func rebuildSession(url: URL, configuration: StreamConfiguration) async throws {
         if let session {
-            await mixer.removeOutput(session.stream)
+            await programMixer.removeOutput(session.stream)
             try? await session.close()
         }
 
@@ -303,14 +360,14 @@ final class CameraStudioModel: ObservableObject {
         session = newSession
         preparedURL = url
         try await applyEncodingSettings(configuration)
-        await mixer.addOutput(newSession.stream)
+        await programMixer.addOutput(newSession.stream)
     }
 
     private func applyEncodingSettings(_ configuration: StreamConfiguration) async throws {
         guard let session else { return }
 
         var videoSettings = await session.stream.videoSettings
-        videoSettings.videoSize = CGSize(width: 1280, height: 720)
+        videoSettings.videoSize = outputSize
         videoSettings.bitRate = configuration.bitrate
         videoSettings.expectedFrameRate = Float64(configuration.framesPerSecond)
         videoSettings.profileLevel = kVTProfileLevel_H264_Main_AutoLevel as String
@@ -321,11 +378,268 @@ final class CameraStudioModel: ObservableObject {
         try await session.stream.setAudioSettings(audioSettings)
     }
 
+    @ScreenActor
+    private func rebuildProgramScene(_ scene: StudioScene?, size: CGSize) async {
+        await clearProgramObjects()
+
+        let sources = scene?.sources.filter(\.isVisible) ?? []
+        if !sources.contains(where: { $0.kind == .camera }),
+           let black = makeSolidImage(hex: "000000", size: size) {
+            await addProgramImage(black, size: size)
+        }
+
+        for source in sources.reversed() {
+            switch source.kind {
+            case .camera, .audioOutput:
+                continue
+            case .color:
+                if let image = makeSolidImage(hex: source.colorHex, size: size) {
+                    await addProgramImage(image, size: size)
+                }
+            case .screen:
+                if let image = makeSolidImage(hex: "11141B", size: size) {
+                    await addProgramImage(image, size: size)
+                }
+                await addProgramText("Pantalla del iPad\nIníciala desde Capturar pantalla", size: size)
+            case .text:
+                await addProgramText(source.text, size: size)
+            case .image:
+                guard let filename = source.assetPaths.first,
+                      let url = StudioMediaLibrary.url(for: filename),
+                      let image = makeCanvasImage(from: url, size: size) else { continue }
+                await addProgramImage(image, size: size)
+            case .imageGallery:
+                let filenames = source.assetPaths.filter { StudioMediaLibrary.url(for: $0) != nil }
+                guard let filename = filenames.first,
+                      let url = StudioMediaLibrary.url(for: filename),
+                      let image = makeCanvasImage(from: url, size: size) else { continue }
+                let object = ImageScreenObject()
+                object.cgImage = image
+                object.size = size
+                try? await programMixer.screen.addChild(object)
+                activeProgramObjects.append(object)
+                imageGalleryStates.append(
+                    ProgramImageGalleryState(
+                        object: object,
+                        filenames: filenames,
+                        index: 0,
+                        interval: max(source.slideDuration, 1),
+                        nextChange: Date.timeIntervalSinceReferenceDate + max(source.slideDuration, 1),
+                        canvasSize: size
+                    )
+                )
+            case .media, .mediaGallery:
+                let urls = source.assetPaths.compactMap(StudioMediaLibrary.url(for:))
+                guard let url = urls.first else { continue }
+                let object = AssetScreenObject()
+                object.size = size
+                object.videoGravity = .resizeAspect
+                try? object.startReading(AVURLAsset(url: url))
+                try? await programMixer.screen.addChild(object)
+                activeProgramObjects.append(object)
+                if source.loopsMedia || urls.count > 1 {
+                    mediaStates.append(
+                        ProgramMediaState(
+                            object: object,
+                            urls: urls,
+                            index: 0,
+                            interval: max(source.slideDuration, 1),
+                            nextChange: Date.timeIntervalSinceReferenceDate + max(source.slideDuration, 1),
+                            loops: source.loopsMedia,
+                            isGallery: source.kind == .mediaGallery
+                        )
+                    )
+                }
+            }
+        }
+
+        startProgramAnimationLoopIfNeeded()
+    }
+
+    @ScreenActor
+    private func clearProgramObjects() async {
+        programAnimationTask?.cancel()
+        programAnimationTask = nil
+        imageGalleryStates.removeAll()
+        mediaStates.removeAll()
+        for object in activeProgramObjects {
+            if let asset = object as? AssetScreenObject {
+                asset.cancelReading()
+            }
+            await programMixer.screen.removeChild(object)
+        }
+        activeProgramObjects.removeAll()
+    }
+
+    @ScreenActor
+    private func startProgramAnimationLoopIfNeeded() {
+        guard !imageGalleryStates.isEmpty || !mediaStates.isEmpty else { return }
+        programAnimationTask = Task { @ScreenActor in
+            while !Task.isCancelled {
+                let now = Date.timeIntervalSinceReferenceDate
+
+                for index in imageGalleryStates.indices where now >= imageGalleryStates[index].nextChange {
+                    imageGalleryStates[index].index =
+                        (imageGalleryStates[index].index + 1) % imageGalleryStates[index].filenames.count
+                    let filename = imageGalleryStates[index].filenames[imageGalleryStates[index].index]
+                    if let url = StudioMediaLibrary.url(for: filename),
+                       let image = makeCanvasImage(from: url, size: imageGalleryStates[index].canvasSize) {
+                        imageGalleryStates[index].object.cgImage = image
+                        imageGalleryStates[index].object.invalidateLayout()
+                    }
+                    imageGalleryStates[index].nextChange = now + imageGalleryStates[index].interval
+                }
+
+                for index in mediaStates.indices {
+                    let state = mediaStates[index]
+                    if state.isGallery, now >= state.nextChange {
+                        let isLast = state.index == state.urls.count - 1
+                        if !isLast || state.loops {
+                            mediaStates[index].index = (state.index + 1) % state.urls.count
+                            mediaStates[index].object.cancelReading()
+                            try? mediaStates[index].object.startReading(
+                                AVURLAsset(url: mediaStates[index].urls[mediaStates[index].index])
+                            )
+                        }
+                        mediaStates[index].nextChange = now + state.interval
+                    } else if !state.isGallery, state.loops, !state.object.isReading {
+                        try? mediaStates[index].object.startReading(AVURLAsset(url: state.urls[state.index]))
+                    }
+                }
+
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
+    @ScreenActor
+    private func addProgramImage(_ image: CGImage, size: CGSize) async {
+        let object = ImageScreenObject()
+        object.cgImage = image
+        object.size = size
+        try? await programMixer.screen.addChild(object)
+        activeProgramObjects.append(object)
+    }
+
+    @ScreenActor
+    private func addProgramText(_ text: String, size: CGSize) async {
+        let object = TextScreenObject()
+        object.string = text
+        object.attributes = [
+            .font: UIFont.boldSystemFont(ofSize: max(32, size.height * 0.07)),
+            .foregroundColor: UIColor.white,
+        ]
+        object.horizontalAlignment = .center
+        object.verticalAlignment = .middle
+        object.size = CGSize(width: size.width * 0.9, height: size.height * 0.8)
+        object.invalidateLayout()
+        try? await programMixer.screen.addChild(object)
+        activeProgramObjects.append(object)
+    }
+
+    @ScreenActor
+    private func makeSolidImage(hex: String, size: CGSize) -> CGImage? {
+        guard let context = makeBitmapContext(size: size) else { return nil }
+        context.setFillColor(UIColor(studioHex: hex).cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        return context.makeImage()
+    }
+
+    @ScreenActor
+    private func makeCanvasImage(from url: URL, size: CGSize) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              let context = makeBitmapContext(size: size) else { return nil }
+
+        let scale = min(size.width / CGFloat(image.width), size.height / CGFloat(image.height))
+        let drawSize = CGSize(width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
+        let rect = CGRect(
+            x: (size.width - drawSize.width) / 2,
+            y: (size.height - drawSize.height) / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+        context.interpolationQuality = .high
+        context.draw(image, in: rect)
+        return context.makeImage()
+    }
+
+    @ScreenActor
+    private func makeBitmapContext(size: CGSize) -> CGContext? {
+        CGContext(
+            data: nil,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: Int(size.width) * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )
+    }
+
+    private func refreshIdleTimerPolicy() {
+        UIApplication.shared.isIdleTimerDisabled = isLive || isRecording || hasExternalOutput
+    }
+
     private func friendlyMessage(for error: Error) -> String {
         if let studioError = error as? StudioError {
             return studioError.localizedDescription
         }
         return "No se pudo completar la operación: \(error.localizedDescription)"
+    }
+}
+
+private final class ProgramMixerBridge: MediaMixerOutput, @unchecked Sendable {
+    let videoTrackId: UInt8? = UInt8.max
+    let audioTrackId: UInt8? = UInt8.max
+
+    private let target: MediaMixer
+
+    init(target: MediaMixer) {
+        self.target = target
+    }
+
+    func selectTrack(_ id: UInt8?, mediaType: CMFormatDescription.MediaType) async {}
+
+    nonisolated func mixer(_ mixer: MediaMixer, didOutput sampleBuffer: CMSampleBuffer) {
+        Task { [target] in await target.append(sampleBuffer) }
+    }
+
+    nonisolated func mixer(_ mixer: MediaMixer, didOutput buffer: AVAudioPCMBuffer, when: AVAudioTime) {
+        Task { [target] in await target.append(buffer, when: when) }
+    }
+}
+
+private struct ProgramImageGalleryState {
+    let object: ImageScreenObject
+    let filenames: [String]
+    var index: Int
+    let interval: TimeInterval
+    var nextChange: TimeInterval
+    let canvasSize: CGSize
+}
+
+private struct ProgramMediaState {
+    let object: AssetScreenObject
+    let urls: [URL]
+    var index: Int
+    let interval: TimeInterval
+    var nextChange: TimeInterval
+    let loops: Bool
+    let isGallery: Bool
+}
+
+private extension UIColor {
+    convenience init(studioHex hex: String) {
+        var value: UInt64 = 0
+        Scanner(string: hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted))
+            .scanHexInt64(&value)
+        self.init(
+            red: CGFloat((value >> 16) & 0xFF) / 255,
+            green: CGFloat((value >> 8) & 0xFF) / 255,
+            blue: CGFloat(value & 0xFF) / 255,
+            alpha: 1
+        )
     }
 }
 
