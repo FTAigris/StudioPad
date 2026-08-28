@@ -35,6 +35,34 @@ struct SettingsView: View {
                 }
 
                 Section("Calidad") {
+                    Picker(
+                        "Resolución del lienzo",
+                        selection: Binding(
+                            get: { configuration.resolutionPreset },
+                            set: { configuration.resolutionPreset = $0 }
+                        )
+                    ) {
+                        ForEach(StudioResolutionPreset.allCases) { preset in
+                            Text(preset.rawValue).tag(preset)
+                        }
+                    }
+
+                    HStack {
+                        TextField("Ancho", value: $configuration.outputWidth, format: .number)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                        Text("×")
+                            .foregroundStyle(.secondary)
+                        TextField("Alto", value: $configuration.outputHeight, format: .number)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    .onSubmit { configuration.normalizeResolution() }
+
+                    Text("El lienzo usa estos píxeles, pero Vista previa y Programa se ajustan dentro de sus paneles como en OBS.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
                     Picker("Fotogramas por segundo", selection: $configuration.framesPerSecond) {
                         Text("30 FPS").tag(30)
                         Text("60 FPS").tag(60)
@@ -54,13 +82,20 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Pantalla externa") {
+                    Label("Compatible con pantalla extendida y Stage Manager", systemImage: "display.2")
+                    Text("Para mantener Programa activo, deja StudioPad visible en una ventana. Si abandonas completamente la app, iPadOS puede suspenderla y congelar la salida externa.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section {
                     Text("La clave queda guardada en el llavero protegido de este iPad. No la compartas ni la incluyas en capturas de pantalla.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("Transmisión")
+            .navigationTitle("Ajustes")
         }
     }
 }

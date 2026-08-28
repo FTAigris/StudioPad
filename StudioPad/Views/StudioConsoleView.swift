@@ -1,3 +1,4 @@
+import AVKit
 import SwiftUI
 
 struct StudioConsoleView: View {
@@ -29,7 +30,25 @@ struct StudioConsoleView: View {
         .preferredColorScheme(.dark)
         .task {
             await studio.cameraModel.prepare(using: configuration)
+            studio.cameraModel.updateOutputConfiguration(using: configuration)
+            studio.cameraModel.updateProgramScene(studio.programScene)
+            studio.cameraModel.setExternalOutputActive(outputs.selectedDestination.isExternal)
             synchronizeMicrophoneControls()
+        }
+        .onChange(of: studio.programScene) { _, scene in
+            studio.cameraModel.updateProgramScene(scene)
+        }
+        .onChange(of: configuration.outputWidth) { _, _ in
+            studio.cameraModel.updateOutputConfiguration(using: configuration)
+        }
+        .onChange(of: configuration.outputHeight) { _, _ in
+            studio.cameraModel.updateOutputConfiguration(using: configuration)
+        }
+        .onChange(of: configuration.framesPerSecond) { _, _ in
+            studio.cameraModel.updateOutputConfiguration(using: configuration)
+        }
+        .onChange(of: outputs.selectedDestinationID) { _, _ in
+            studio.cameraModel.setExternalOutputActive(outputs.selectedDestination.isExternal)
         }
         .sheet(isPresented: $showsScreenControls) {
             ScreenStudioView()
@@ -124,7 +143,11 @@ struct StudioConsoleView: View {
         ) {
             EmptyView()
         } content: {
-            StudioCanvas(scene: studio.previewScene, cameraModel: studio.cameraModel)
+            StudioCanvas(
+                scene: studio.previewScene,
+                cameraModel: studio.cameraModel,
+                canvasSize: configuration.outputSize
+            )
         }
     }
 
@@ -136,7 +159,11 @@ struct StudioConsoleView: View {
         ) {
             outputMenu
         } content: {
-            StudioCanvas(scene: studio.programScene, cameraModel: studio.cameraModel)
+            StudioCanvas(
+                scene: studio.programScene,
+                cameraModel: studio.cameraModel,
+                canvasSize: configuration.outputSize
+            )
                 .id(studio.programSceneID)
         }
     }
@@ -213,7 +240,7 @@ struct StudioConsoleView: View {
                 Label("EN DIRECTO", systemImage: "dot.radiowaves.left.and.right")
                     .foregroundStyle(.red)
             }
-            Text("1280 × 720")
+            Text("\(Int(configuration.outputSize.width)) × \(Int(configuration.outputSize.height))")
             Text("\(configuration.framesPerSecond) FPS")
         }
         .font(.caption2.bold())
@@ -244,6 +271,7 @@ struct StudioConsoleView: View {
 struct StudioCanvas: View {
     let scene: StudioScene?
     let cameraModel: CameraStudioModel
+    let canvasSize: CGSize
 
     var body: some View {
         GeometryReader { geometry in
@@ -272,7 +300,7 @@ struct StudioCanvas: View {
             .clipped()
         }
         .background(.black)
-        .aspectRatio(16 / 9, contentMode: .fit)
+        .aspectRatio(canvasSize.width / max(canvasSize.height, 1), contentMode: .fit)
     }
 
     @ViewBuilder
@@ -308,7 +336,124 @@ struct StudioCanvas: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .color:
             Color(studioHex: source.colorHex)
+        case .image, .imageGallery:
+            StudioImageSourceLayer(source: source)
+                .frame(width: size.width, height: size.height)
+        case .media, .mediaGallery:
+            StudioMediaSourceLayer(source: source)
+                .frame(width: size.width, height: size.height)
+        case .audioOutput:
+            EmptyView()
         }
+    }
+}
+
+private struct StudioImageSourceLayer: View {
+    let source: StudioSource
+
+    var body: some View {
+        if source.kind == .imageGallery, source.assetPaths.count > 1 {
+            TimelineView(.periodic(from: .now, by: max(source.slideDuration, 1))) { context in
+                image(for: galleryIndex(at: context.date))
+            }
+        } else {
+            image(for: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func image(for index: Int) -> some View {
+        if source.assetPaths.indices.contains(index),
+           let url = StudioMediaLibrary.url(for: source.assetPaths[index]),
+           let image = UIImage(contentsOfFile: url.path) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+        } else {
+            sourcePlaceholder(icon: source.kind.icon, title: "Elige imágenes en Ajustes de fuente")
+        }
+    }
+
+    private func galleryIndex(at date: Date) -> Int {
+        guard !source.assetPaths.isEmpty else { return 0 }
+        return Int(date.timeIntervalSinceReferenceDate / max(source.slideDuration, 1)) % source.assetPaths.count
+    }
+}
+
+private struct StudioMediaSourceLayer: View {
+    let source: StudioSource
+
+    var body: some View {
+        if source.kind == .mediaGallery, source.assetPaths.count > 1 {
+            TimelineView(.periodic(from: .now, by: max(source.slideDuration, 1))) { context in
+                player(for: galleryIndex(at: context.date))
+            }
+        } else {
+            player(for: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func player(for index: Int) -> some View {
+        if source.assetPaths.indices.contains(index),
+           let url = StudioMediaLibrary.url(for: source.assetPaths[index]) {
+            StudioVideoPlayer(
+                url: url,
+                loops: source.loopsMedia,
+                isMuted: source.isMediaMuted,
+                volume: Float(source.mediaVolume)
+            )
+        } else {
+            sourcePlaceholder(icon: source.kind.icon, title: "Elige videos en Ajustes de fuente")
+        }
+    }
+
+    private func galleryIndex(at date: Date) -> Int {
+        guard !source.assetPaths.isEmpty else { return 0 }
+        return Int(date.timeIntervalSinceReferenceDate / max(source.slideDuration, 1)) % source.assetPaths.count
+    }
+}
+
+private struct StudioVideoPlayer: View {
+    let url: URL
+    let loops: Bool
+    let isMuted: Bool
+    let volume: Float
+
+    @State private var player = AVPlayer()
+
+    var body: some View {
+        VideoPlayer(player: player)
+            .task(id: url) {
+                player.replaceCurrentItem(with: AVPlayerItem(url: url))
+                player.isMuted = isMuted
+                player.volume = volume
+                player.play()
+            }
+            .onChange(of: isMuted) { _, muted in player.isMuted = muted }
+            .onChange(of: volume) { _, newVolume in player.volume = newVolume }
+            .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+                guard loops,
+                      let endedItem = notification.object as? AVPlayerItem,
+                      endedItem === player.currentItem else { return }
+                player.seek(to: .zero)
+                player.play()
+            }
+            .onDisappear { player.pause() }
+    }
+}
+
+@ViewBuilder
+private func sourcePlaceholder(icon: String, title: String) -> some View {
+    ZStack {
+        Color.black.opacity(0.72)
+        VStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.largeTitle)
+            Text(title)
+                .font(.caption)
+        }
+        .foregroundStyle(.secondary)
     }
 }
 
@@ -316,13 +461,18 @@ struct ExternalProgramView: View {
     let sessionID: String
     @EnvironmentObject private var studio: StudioStore
     @EnvironmentObject private var outputs: ExternalDisplayManager
+    @EnvironmentObject private var configuration: StreamConfiguration
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
             if outputs.selectedDestinationID == sessionID {
-                StudioCanvas(scene: studio.programScene, cameraModel: studio.cameraModel)
+                StudioCanvas(
+                    scene: studio.programScene,
+                    cameraModel: studio.cameraModel,
+                    canvasSize: configuration.outputSize
+                )
                     .id(studio.programSceneID)
                     .ignoresSafeArea()
             } else {
@@ -455,6 +605,7 @@ private struct TransitionBridge: View {
 
 private struct ScenesPanel: View {
     @EnvironmentObject private var studio: StudioStore
+    @State private var editingScene: StudioScene?
 
     var body: some View {
         DockPanel(title: "Escenas", icon: "square.stack.3d.up.fill") {
@@ -471,6 +622,9 @@ private struct ScenesPanel: View {
                                 Text(scene.name)
                                     .lineLimit(1)
                                 Spacer()
+                                Image(systemName: "line.3.horizontal")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                                 if scene.id == studio.previewSceneID {
                                     Image(systemName: "eye.fill")
                                         .foregroundStyle(.green)
@@ -486,6 +640,20 @@ private struct ScenesPanel: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                editingScene = scene
+                            } label: {
+                                Label("Renombrar", systemImage: "pencil")
+                            }
+                        }
+                        .draggable(scene.id.uuidString)
+                        .dropDestination(for: String.self) { items, _ in
+                            guard let rawID = items.first,
+                                  let sourceID = UUID(uuidString: rawID) else { return false }
+                            studio.moveScene(sourceID, to: scene.id)
+                            return true
+                        }
                     }
                 }
                 .padding(6)
@@ -494,7 +662,15 @@ private struct ScenesPanel: View {
             HStack(spacing: 4) {
                 SmallIconButton(icon: "plus", label: "Añadir escena", action: studio.addScene)
                 SmallIconButton(icon: "trash", label: "Eliminar escena", action: studio.deletePreviewScene)
+                SmallIconButton(icon: "pencil", label: "Renombrar escena") {
+                    editingScene = studio.previewScene
+                }
                 Spacer()
+            }
+        }
+        .sheet(item: $editingScene) { scene in
+            SceneRenameView(sceneID: scene.id, currentName: scene.name) { id, name in
+                studio.renameScene(id, to: name)
             }
         }
     }
@@ -502,6 +678,7 @@ private struct ScenesPanel: View {
 
 private struct SourcesPanel: View {
     @EnvironmentObject private var studio: StudioStore
+    @State private var settingsSource: StudioSource?
 
     var body: some View {
         DockPanel(title: "Fuentes", icon: "photo.on.rectangle.angled") {
@@ -518,6 +695,9 @@ private struct SourcesPanel: View {
                                     Text(source.name)
                                         .lineLimit(1)
                                     Spacer(minLength: 0)
+                                    Image(systemName: "line.3.horizontal")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
                                 }
                                 .contentShape(Rectangle())
                             }
@@ -549,6 +729,21 @@ private struct SourcesPanel: View {
                                 : Color.clear,
                             in: RoundedRectangle(cornerRadius: 5)
                         )
+                        .contextMenu {
+                            Button {
+                                studio.selectedSourceID = source.id
+                                settingsSource = source
+                            } label: {
+                                Label("Ajustes y nombre", systemImage: "gearshape")
+                            }
+                        }
+                        .draggable(source.id.uuidString)
+                        .dropDestination(for: String.self) { items, _ in
+                            guard let rawID = items.first,
+                                  let sourceID = UUID(uuidString: rawID) else { return false }
+                            studio.moveSource(sourceID, to: source.id)
+                            return true
+                        }
                     }
                 }
                 .padding(6)
@@ -571,6 +766,9 @@ private struct SourcesPanel: View {
                 .accessibilityLabel("Añadir fuente")
 
                 SmallIconButton(icon: "trash", label: "Eliminar fuente", action: studio.deleteSelectedSource)
+                SmallIconButton(icon: "gearshape", label: "Ajustes de fuente") {
+                    settingsSource = studio.selectedSource
+                }
                 Spacer()
                 SmallIconButton(icon: "chevron.up", label: "Subir fuente") {
                     studio.moveSelectedSource(by: -1)
@@ -579,6 +777,9 @@ private struct SourcesPanel: View {
                     studio.moveSelectedSource(by: 1)
                 }
             }
+        }
+        .sheet(item: $settingsSource) { source in
+            SourceSettingsView(source: source, onSave: studio.updateSource)
         }
     }
 }
