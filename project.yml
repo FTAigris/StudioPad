@@ -16,7 +16,7 @@ settings:
 packages:
   HaishinKit:
     url: https://github.com/HaishinKit/HaishinKit.swift
-    exactVersion: 2.2.0
+    exactVersion: 2.2.5
 
 targets:
   StudioPad:
