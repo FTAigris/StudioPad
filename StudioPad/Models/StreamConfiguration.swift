@@ -1,4 +1,5 @@
 import Combine
+import CoreGraphics
 import Foundation
 
 enum StreamDestination: String, CaseIterable, Identifiable {
@@ -23,14 +24,36 @@ enum StreamDestination: String, CaseIterable, Identifiable {
     }
 }
 
+enum StudioResolutionPreset: String, CaseIterable, Identifiable {
+    case fullHD = "1920 × 1080"
+    case hd = "1280 × 720"
+    case verticalFullHD = "1080 × 1920"
+    case custom = "Personalizada"
+
+    var id: String { rawValue }
+
+    var dimensions: (width: Int, height: Int)? {
+        switch self {
+        case .fullHD: return (1920, 1080)
+        case .hd: return (1280, 720)
+        case .verticalFullHD: return (1080, 1920)
+        case .custom: return nil
+        }
+    }
+}
+
 @MainActor
 final class StreamConfiguration: ObservableObject {
+    static let shared = StreamConfiguration()
+
     private enum Keys {
         static let destination = "stream.destination"
         static let serverURL = "stream.serverURL"
         static let streamKey = "stream.key"
         static let bitrate = "stream.bitrate"
         static let framesPerSecond = "stream.fps"
+        static let outputWidth = "studio.output.width"
+        static let outputHeight = "studio.output.height"
     }
 
     @Published var destination: StreamDestination {
@@ -53,6 +76,14 @@ final class StreamConfiguration: ObservableObject {
         didSet { defaults.set(framesPerSecond, forKey: Keys.framesPerSecond) }
     }
 
+    @Published var outputWidth: Int {
+        didSet { defaults.set(outputWidth, forKey: Keys.outputWidth) }
+    }
+
+    @Published var outputHeight: Int {
+        didSet { defaults.set(outputHeight, forKey: Keys.outputHeight) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -70,6 +101,12 @@ final class StreamConfiguration: ObservableObject {
 
         let savedFPS = defaults.integer(forKey: Keys.framesPerSecond)
         framesPerSecond = savedFPS == 0 ? 30 : savedFPS
+
+        let savedWidth = defaults.integer(forKey: Keys.outputWidth)
+        outputWidth = savedWidth == 0 ? 1920 : savedWidth
+
+        let savedHeight = defaults.integer(forKey: Keys.outputHeight)
+        outputHeight = savedHeight == 0 ? 1080 : savedHeight
 
         if KeychainStore.string(forKey: Keys.streamKey) == nil, !streamKey.isEmpty {
             KeychainStore.set(streamKey, forKey: Keys.streamKey)
@@ -90,4 +127,39 @@ final class StreamConfiguration: ObservableObject {
     }
 
     var isValid: Bool { streamURL != nil }
+
+    var resolutionPreset: StudioResolutionPreset {
+        get {
+            StudioResolutionPreset.allCases.first(where: { preset in
+                guard let dimensions = preset.dimensions else { return false }
+                return dimensions.width == outputWidth && dimensions.height == outputHeight
+            }) ?? .custom
+        }
+        set {
+            guard let dimensions = newValue.dimensions else { return }
+            outputWidth = dimensions.width
+            outputHeight = dimensions.height
+        }
+    }
+
+    var outputSize: CGSize {
+        CGSize(
+            width: CGFloat(normalized(outputWidth, minimum: 320, maximum: 3840)),
+            height: CGFloat(normalized(outputHeight, minimum: 240, maximum: 2160))
+        )
+    }
+
+    var outputAspectRatio: CGFloat {
+        outputSize.width / max(outputSize.height, 1)
+    }
+
+    func normalizeResolution() {
+        outputWidth = Int(outputSize.width)
+        outputHeight = Int(outputSize.height)
+    }
+
+    private func normalized(_ value: Int, minimum: Int, maximum: Int) -> Int {
+        let clamped = min(max(value, minimum), maximum)
+        return clamped.isMultiple(of: 2) ? clamped : clamped - 1
+    }
 }

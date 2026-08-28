@@ -6,6 +6,11 @@ enum StudioSourceKind: String, CaseIterable, Codable, Identifiable, Sendable {
     case screen
     case text
     case color
+    case image
+    case imageGallery
+    case media
+    case mediaGallery
+    case audioOutput
 
     var id: String { rawValue }
 
@@ -15,6 +20,11 @@ enum StudioSourceKind: String, CaseIterable, Codable, Identifiable, Sendable {
         case .screen: return "Pantalla del iPad"
         case .text: return "Texto"
         case .color: return "Fondo de color"
+        case .image: return "Imagen"
+        case .imageGallery: return "Galería de imágenes"
+        case .media: return "Multimedia"
+        case .mediaGallery: return "Galería de multimedia"
+        case .audioOutput: return "Captura de salida de audio"
         }
     }
 
@@ -24,6 +34,11 @@ enum StudioSourceKind: String, CaseIterable, Codable, Identifiable, Sendable {
         case .screen: return "rectangle.inset.filled"
         case .text: return "textformat"
         case .color: return "paintpalette.fill"
+        case .image: return "photo"
+        case .imageGallery: return "photo.stack"
+        case .media: return "play.rectangle.fill"
+        case .mediaGallery: return "rectangle.stack.fill"
+        case .audioOutput: return "speaker.wave.2.fill"
         }
     }
 }
@@ -36,6 +51,11 @@ struct StudioSource: Identifiable, Codable, Equatable, Sendable {
     var isLocked: Bool
     var text: String
     var colorHex: String
+    var assetPaths: [String]
+    var slideDuration: Double
+    var loopsMedia: Bool
+    var mediaVolume: Double
+    var isMediaMuted: Bool
 
     init(
         id: UUID = UUID(),
@@ -44,7 +64,12 @@ struct StudioSource: Identifiable, Codable, Equatable, Sendable {
         isVisible: Bool = true,
         isLocked: Bool = false,
         text: String = "StudioPad",
-        colorHex: String = "1A1D24"
+        colorHex: String = "1A1D24",
+        assetPaths: [String] = [],
+        slideDuration: Double = 5,
+        loopsMedia: Bool = true,
+        mediaVolume: Double = 1,
+        isMediaMuted: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -53,6 +78,32 @@ struct StudioSource: Identifiable, Codable, Equatable, Sendable {
         self.isLocked = isLocked
         self.text = text
         self.colorHex = colorHex
+        self.assetPaths = assetPaths
+        self.slideDuration = slideDuration
+        self.loopsMedia = loopsMedia
+        self.mediaVolume = mediaVolume
+        self.isMediaMuted = isMediaMuted
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, kind, isVisible, isLocked, text, colorHex
+        case assetPaths, slideDuration, loopsMedia, mediaVolume, isMediaMuted
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        kind = try values.decode(StudioSourceKind.self, forKey: .kind)
+        isVisible = try values.decodeIfPresent(Bool.self, forKey: .isVisible) ?? true
+        isLocked = try values.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
+        text = try values.decodeIfPresent(String.self, forKey: .text) ?? "StudioPad"
+        colorHex = try values.decodeIfPresent(String.self, forKey: .colorHex) ?? "1A1D24"
+        assetPaths = try values.decodeIfPresent([String].self, forKey: .assetPaths) ?? []
+        slideDuration = try values.decodeIfPresent(Double.self, forKey: .slideDuration) ?? 5
+        loopsMedia = try values.decodeIfPresent(Bool.self, forKey: .loopsMedia) ?? true
+        mediaVolume = try values.decodeIfPresent(Double.self, forKey: .mediaVolume) ?? 1
+        isMediaMuted = try values.decodeIfPresent(Bool.self, forKey: .isMediaMuted) ?? false
     }
 }
 
@@ -209,6 +260,11 @@ final class StudioStore: ObservableObject {
         scenes.first(where: { $0.id == programSceneID })
     }
 
+    var selectedSource: StudioSource? {
+        guard let selectedSourceID else { return nil }
+        return previewScene?.sources.first(where: { $0.id == selectedSourceID })
+    }
+
     func selectPreviewScene(_ id: UUID) {
         guard let scene = scenes.first(where: { $0.id == id }) else { return }
         previewSceneID = scene.id
@@ -234,6 +290,23 @@ final class StudioStore: ObservableObject {
         scenes.append(scene)
         previewSceneID = scene.id
         selectedSourceID = source.id
+        save()
+    }
+
+    func renameScene(_ id: UUID, to proposedName: String) {
+        guard let index = scenes.firstIndex(where: { $0.id == id }) else { return }
+        let name = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        scenes[index].name = name
+        save()
+    }
+
+    func moveScene(_ sourceID: UUID, to targetID: UUID) {
+        guard sourceID != targetID,
+              let sourceIndex = scenes.firstIndex(where: { $0.id == sourceID }),
+              let targetIndex = scenes.firstIndex(where: { $0.id == targetID }) else { return }
+        let scene = scenes.remove(at: sourceIndex)
+        scenes.insert(scene, at: min(targetIndex, scenes.count))
         save()
     }
 
@@ -263,6 +336,29 @@ final class StudioStore: ObservableObject {
             colorHex: kind == .color ? "173A5E" : "1A1D24"
         )
         scenes[sceneIndex].sources.insert(source, at: 0)
+        selectedSourceID = source.id
+        save()
+    }
+
+    func updateSource(_ source: StudioSource) {
+        guard let location = sourceLocation(source.id) else { return }
+        var updated = source
+        let cleanedName = source.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.name = cleanedName.isEmpty ? source.kind.title : cleanedName
+        updated.slideDuration = min(max(updated.slideDuration, 1), 60)
+        updated.mediaVolume = min(max(updated.mediaVolume, 0), 1)
+        scenes[location.scene].sources[location.source] = updated
+        selectedSourceID = updated.id
+        save()
+    }
+
+    func moveSource(_ sourceID: UUID, to targetID: UUID) {
+        guard sourceID != targetID,
+              let sceneIndex = previewSceneIndex,
+              let sourceIndex = scenes[sceneIndex].sources.firstIndex(where: { $0.id == sourceID }),
+              let targetIndex = scenes[sceneIndex].sources.firstIndex(where: { $0.id == targetID }) else { return }
+        let source = scenes[sceneIndex].sources.remove(at: sourceIndex)
+        scenes[sceneIndex].sources.insert(source, at: min(targetIndex, scenes[sceneIndex].sources.count))
         selectedSourceID = source.id
         save()
     }
