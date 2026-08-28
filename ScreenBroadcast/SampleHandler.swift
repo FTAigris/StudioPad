@@ -8,7 +8,7 @@ final class SampleHandler: RPBroadcastSampleHandler, @unchecked Sendable {
         captureSessionMode: .manual,
         multiTrackAudioMixingEnabled: true
     )
-    private var session: (any StreamSession)?
+    private var session: (any Session)?
     private var configurationReceiver: BroadcastConfigurationReceiver?
     private var configurationTimeout: Task<Void, Never>?
     private var needsVideoConfiguration = true
@@ -107,11 +107,13 @@ final class SampleHandler: RPBroadcastSampleHandler, @unchecked Sendable {
 
     private func startBroadcast(to url: URL) async {
         do {
-            await StreamSessionBuilderFactory.shared.register(RTMPSessionFactory())
+            await SessionBuilderFactory.shared.register(RTMPSessionFactory())
 
-            let newSession = try await StreamSessionBuilderFactory.shared.make(url)
+            guard let newSession = try await SessionBuilderFactory.shared.make(url)
                 .setMode(.publish)
-                .build()
+                .build() else {
+                throw Self.error("No se pudo crear la sesión de transmisión.")
+            }
             session = newSession
 
             var mixerVideoSettings = await mixer.videoMixerSettings
