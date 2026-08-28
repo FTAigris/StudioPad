@@ -19,7 +19,7 @@ struct StudioPadApp: App {
             }
             .task {
                 guard !isReady else { return }
-                await StreamSessionBuilderFactory.shared.register(RTMPSessionFactory())
+                await SessionBuilderFactory.shared.register(RTMPSessionFactory())
                 isReady = true
             }
         }
@@ -43,4 +43,3 @@ private struct LaunchView: View {
         }
     }
 }
-
