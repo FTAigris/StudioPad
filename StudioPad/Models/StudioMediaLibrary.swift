@@ -1,5 +1,6 @@
 import Foundation
 import PhotosUI
+import SwiftUI
 import UniformTypeIdentifiers
 
 enum StudioMediaLibrary {
@@ -15,7 +16,10 @@ enum StudioMediaLibrary {
             let type = item.supportedContentTypes.first
             let fileExtension = type?.preferredFilenameExtension ?? "dat"
             let filename = "\(UUID().uuidString).\(fileExtension)"
-            try data.write(to: directoryURL.appendingPathComponent(filename), options: .atomic)
+            try data.write(
+                to: directoryURL.appendingPathComponent(filename),
+                options: Data.WritingOptions.atomic
+            )
             filenames.append(filename)
         }
         return filenames
