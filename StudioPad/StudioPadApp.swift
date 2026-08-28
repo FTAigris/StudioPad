@@ -4,7 +4,7 @@ import SwiftUI
 
 @main
 struct StudioPadApp: App {
-    @StateObject private var configuration = StreamConfiguration()
+    @StateObject private var configuration = StreamConfiguration.shared
     @StateObject private var studio = StudioStore.shared
     @State private var isReady = false
 

@@ -26,6 +26,8 @@
     <string>StudioPad usa el micrófono para incluir tu voz en la transmisión.</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>StudioPad guarda las grabaciones que tú solicites en Fotos.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>StudioPad te permite elegir imágenes y videos para tus fuentes.</string>
     <key>UIApplicationSupportsIndirectInputEvents</key>
     <true/>
     <key>UIApplicationSceneManifest</key>
