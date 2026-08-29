@@ -34,7 +34,10 @@ final class CameraStudioModel: ObservableObject {
     @Published var errorMessage: String?
 
     private let captureMixer = MediaMixer()
-    private let programMixer = MediaMixer(captureSessionMode: .manual)
+    private let programMixer = MediaMixer(
+        captureSessionMode: .manual,
+        multiTrackAudioMixingEnabled: true
+    )
     private lazy var programBridge = ProgramMixerBridge(target: programMixer)
     private var session: (any Session)?
     private var recorder: StreamRecorder?
@@ -47,6 +50,7 @@ final class CameraStudioModel: ObservableObject {
     @ScreenActor private var activeProgramObjects: [ScreenObject] = []
     @ScreenActor private var imageGalleryStates: [ProgramImageGalleryState] = []
     @ScreenActor private var mediaStates: [ProgramMediaState] = []
+    @ScreenActor private var programAudioPlayers: [ProgramAudioSourcePlayer] = []
     @ScreenActor private var programAnimationTask: Task<Void, Never>?
 
     var isLive: Bool { status == .live }
@@ -382,41 +386,56 @@ final class CameraStudioModel: ObservableObject {
     private func rebuildProgramScene(_ scene: StudioScene?, size: CGSize) async {
         await clearProgramObjects()
 
-        let sources = scene?.sources.filter(\.isVisible) ?? []
-        if !sources.contains(where: { $0.kind == .camera }),
-           let black = makeSolidImage(hex: "000000", size: size) {
+        if let black = makeSolidImage(hex: "000000", size: size) {
             await addProgramImage(black, size: size)
         }
 
+        let sources = scene?.sources.filter(\.isVisible) ?? []
+        var nextAudioTrack: UInt8 = 1
+
         for source in sources.reversed() {
             switch source.kind {
-            case .camera, .audioOutput:
-                continue
+            case .camera:
+                let object = VideoTrackScreenObject()
+                object.track = 0
+                configureProgramObject(object, source: source)
+                try? programMixer.screen.addChild(object)
+                activeProgramObjects.append(object)
+
             case .color:
-                if let image = makeSolidImage(hex: source.colorHex, size: size) {
-                    await addProgramImage(image, size: size)
+                let layerSize = sourceLayerSize(source)
+                if let image = makeSolidImage(hex: source.colorHex, size: layerSize) {
+                    await addProgramImage(image, source: source)
                 }
+
             case .screen:
-                if let image = makeSolidImage(hex: "11141B", size: size) {
-                    await addProgramImage(image, size: size)
+                let layerSize = sourceLayerSize(source)
+                if let image = makeSolidImage(hex: "11141B", size: layerSize) {
+                    await addProgramImage(image, source: source)
                 }
-                await addProgramText("Pantalla del iPad\nIníciala desde Capturar pantalla", size: size)
+                await addProgramText(
+                    "Pantalla del iPad\nIníciala desde Capturar pantalla",
+                    source: source
+                )
+
             case .text:
-                await addProgramText(source.text, size: size)
+                await addProgramText(source.text, source: source)
+
             case .image:
                 guard let filename = source.assetPaths.first,
                       let url = StudioMediaLibrary.url(for: filename),
-                      let image = makeCanvasImage(from: url, size: size) else { continue }
-                await addProgramImage(image, size: size)
+                      let image = makeCanvasImage(from: url, size: sourceLayerSize(source)) else { continue }
+                await addProgramImage(image, source: source)
+
             case .imageGallery:
                 let filenames = source.assetPaths.filter { StudioMediaLibrary.url(for: $0) != nil }
                 guard let filename = filenames.first,
                       let url = StudioMediaLibrary.url(for: filename),
-                      let image = makeCanvasImage(from: url, size: size) else { continue }
+                      let image = makeCanvasImage(from: url, size: sourceLayerSize(source)) else { continue }
                 let object = ImageScreenObject()
                 object.cgImage = image
-                object.size = size
-                try? await programMixer.screen.addChild(object)
+                configureProgramObject(object, source: source)
+                try? programMixer.screen.addChild(object)
                 activeProgramObjects.append(object)
                 imageGalleryStates.append(
                     ProgramImageGalleryState(
@@ -425,41 +444,55 @@ final class CameraStudioModel: ObservableObject {
                         index: 0,
                         interval: max(source.slideDuration, 1),
                         nextChange: Date.timeIntervalSinceReferenceDate + max(source.slideDuration, 1),
-                        canvasSize: size
+                        canvasSize: sourceLayerSize(source),
+                        playbackMode: source.galleryPlaybackMode,
+                        transitionDuration: source.galleryTransitionDuration,
+                        isFinished: false,
+                        transitionFromIndex: nil,
+                        transitionToIndex: nil,
+                        transitionStartedAt: nil
                     )
                 )
+
             case .media, .mediaGallery:
                 let urls = source.assetPaths.compactMap(StudioMediaLibrary.url(for:))
                 guard let url = urls.first else { continue }
                 let object = AssetScreenObject()
-                object.size = size
                 object.videoGravity = .resizeAspect
+                configureProgramObject(object, source: source)
                 try? object.startReading(AVURLAsset(url: url))
-                try? await programMixer.screen.addChild(object)
+                try? programMixer.screen.addChild(object)
                 activeProgramObjects.append(object)
-                if source.loopsMedia || urls.count > 1 {
-                    mediaStates.append(
-                        ProgramMediaState(
-                            object: object,
-                            urls: urls,
-                            index: 0,
-                            interval: max(source.slideDuration, 1),
-                            nextChange: Date.timeIntervalSinceReferenceDate + max(source.slideDuration, 1),
-                            loops: source.loopsMedia,
-                            isGallery: source.kind == .mediaGallery
-                        )
+                mediaStates.append(
+                    ProgramMediaState(
+                        object: object,
+                        urls: urls,
+                        index: 0,
+                        loops: source.loopsMedia,
+                        isGallery: source.kind == .mediaGallery,
+                        shuffles: source.shufflesPlaylist,
+                        isFinished: false
                     )
-                }
+                )
+
+            case .audioOutput, .audioPlaylist:
+                break
+            }
+
+            if source.kind.hasAudioTrack, nextAudioTrack < UInt8.max {
+                await addProgramAudioSource(source, track: nextAudioTrack)
+                nextAudioTrack += 1
             }
         }
 
         startProgramAnimationLoopIfNeeded()
     }
-
     @ScreenActor
     private func clearProgramObjects() async {
         programAnimationTask?.cancel()
         programAnimationTask = nil
+        programAudioPlayers.forEach { $0.stop() }
+        programAudioPlayers.removeAll()
         imageGalleryStates.removeAll()
         mediaStates.removeAll()
         for object in activeProgramObjects {
@@ -478,32 +511,92 @@ final class CameraStudioModel: ObservableObject {
             while !Task.isCancelled {
                 let now = Date.timeIntervalSinceReferenceDate
 
-                for index in imageGalleryStates.indices where now >= imageGalleryStates[index].nextChange {
-                    imageGalleryStates[index].index =
-                        (imageGalleryStates[index].index + 1) % imageGalleryStates[index].filenames.count
-                    let filename = imageGalleryStates[index].filenames[imageGalleryStates[index].index]
-                    if let url = StudioMediaLibrary.url(for: filename),
-                       let image = makeCanvasImage(from: url, size: imageGalleryStates[index].canvasSize) {
-                        imageGalleryStates[index].object.cgImage = image
-                        imageGalleryStates[index].object.invalidateLayout()
+                for index in imageGalleryStates.indices where !imageGalleryStates[index].isFinished {
+                    if let fromIndex = imageGalleryStates[index].transitionFromIndex,
+                       let toIndex = imageGalleryStates[index].transitionToIndex,
+                       let startedAt = imageGalleryStates[index].transitionStartedAt {
+                        let duration = max(imageGalleryStates[index].transitionDuration, 0.001)
+                        let progress = min(max((now - startedAt) / duration, 0), 1)
+                        if let image = makeBlendedCanvasImage(
+                            from: imageGalleryStates[index].filenames[fromIndex],
+                            to: imageGalleryStates[index].filenames[toIndex],
+                            size: imageGalleryStates[index].canvasSize,
+                            progress: progress
+                        ) {
+                            imageGalleryStates[index].object.cgImage = image
+                            imageGalleryStates[index].object.invalidateLayout()
+                        }
+                        if progress >= 1 {
+                            imageGalleryStates[index].index = toIndex
+                            imageGalleryStates[index].transitionFromIndex = nil
+                            imageGalleryStates[index].transitionToIndex = nil
+                            imageGalleryStates[index].transitionStartedAt = nil
+                            imageGalleryStates[index].nextChange = now + imageGalleryStates[index].interval
+                        }
+                        continue
                     }
-                    imageGalleryStates[index].nextChange = now + imageGalleryStates[index].interval
+
+                    guard now >= imageGalleryStates[index].nextChange else { continue }
+                    let state = imageGalleryStates[index]
+                    let nextIndex: Int
+                    switch state.playbackMode {
+                    case .loop:
+                        nextIndex = (state.index + 1) % state.filenames.count
+                    case .once:
+                        guard state.index + 1 < state.filenames.count else {
+                            imageGalleryStates[index].isFinished = true
+                            continue
+                        }
+                        nextIndex = state.index + 1
+                    case .random:
+                        nextIndex = state.filenames.indices
+                            .filter { $0 != state.index }
+                            .randomElement() ?? state.index
+                    }
+
+                    if state.transitionDuration <= 0 {
+                        let filename = state.filenames[nextIndex]
+                        if let url = StudioMediaLibrary.url(for: filename),
+                           let image = makeCanvasImage(from: url, size: state.canvasSize) {
+                            imageGalleryStates[index].object.cgImage = image
+                            imageGalleryStates[index].object.invalidateLayout()
+                        }
+                        imageGalleryStates[index].index = nextIndex
+                        imageGalleryStates[index].nextChange = now + state.interval
+                    } else {
+                        imageGalleryStates[index].transitionFromIndex = state.index
+                        imageGalleryStates[index].transitionToIndex = nextIndex
+                        imageGalleryStates[index].transitionStartedAt = now
+                    }
                 }
 
                 for index in mediaStates.indices {
                     let state = mediaStates[index]
-                    if state.isGallery, now >= state.nextChange {
+                    guard !state.isFinished, !state.object.isReading else { continue }
+
+                    if state.isGallery {
                         let isLast = state.index == state.urls.count - 1
-                        if !isLast || state.loops {
-                            mediaStates[index].index = (state.index + 1) % state.urls.count
-                            mediaStates[index].object.cancelReading()
-                            try? mediaStates[index].object.startReading(
-                                AVURLAsset(url: mediaStates[index].urls[mediaStates[index].index])
-                            )
+                        if isLast, !state.loops, !state.shuffles {
+                            mediaStates[index].isFinished = true
+                            continue
                         }
-                        mediaStates[index].nextChange = now + state.interval
-                    } else if !state.isGallery, state.loops, !state.object.isReading {
-                        try? mediaStates[index].object.startReading(AVURLAsset(url: state.urls[state.index]))
+                        if state.shuffles, state.urls.count > 1 {
+                            mediaStates[index].index = state.urls.indices
+                                .filter { $0 != state.index }
+                                .randomElement() ?? state.index
+                        } else {
+                            mediaStates[index].index = (state.index + 1) % state.urls.count
+                        }
+                        mediaStates[index].object.cancelReading()
+                        try? mediaStates[index].object.startReading(
+                            AVURLAsset(url: mediaStates[index].urls[mediaStates[index].index])
+                        )
+                    } else if state.loops {
+                        try? mediaStates[index].object.startReading(
+                            AVURLAsset(url: state.urls[state.index])
+                        )
+                    } else {
+                        mediaStates[index].isFinished = true
                     }
                 }
 
@@ -522,19 +615,80 @@ final class CameraStudioModel: ObservableObject {
     }
 
     @ScreenActor
-    private func addProgramText(_ text: String, size: CGSize) async {
+    private func addProgramImage(_ image: CGImage, source: StudioSource) async {
+        let object = ImageScreenObject()
+        object.cgImage = image
+        configureProgramObject(object, source: source)
+        try? programMixer.screen.addChild(object)
+        activeProgramObjects.append(object)
+    }
+
+    @ScreenActor
+    private func addProgramText(_ text: String, source: StudioSource) async {
         let object = TextScreenObject()
         object.string = text
         object.attributes = [
-            .font: UIFont.boldSystemFont(ofSize: max(32, size.height * 0.07)),
+            .font: UIFont.boldSystemFont(ofSize: max(18, CGFloat(source.canvasHeight) * 0.07)),
             .foregroundColor: UIColor.white,
         ]
         object.horizontalAlignment = .center
         object.verticalAlignment = .middle
-        object.size = CGSize(width: size.width * 0.9, height: size.height * 0.8)
-        object.invalidateLayout()
-        try? await programMixer.screen.addChild(object)
+        configureProgramObject(object, source: source)
+        try? programMixer.screen.addChild(object)
         activeProgramObjects.append(object)
+    }
+
+    @ScreenActor
+    private func sourceLayerSize(_ source: StudioSource) -> CGSize {
+        CGSize(
+            width: max(CGFloat(source.canvasWidth), 1),
+            height: max(CGFloat(source.canvasHeight), 1)
+        )
+    }
+
+    @ScreenActor
+    private func configureProgramObject(_ object: ScreenObject, source: StudioSource) {
+        object.size = sourceLayerSize(source)
+        object.horizontalAlignment = .left
+        object.verticalAlignment = .top
+        object.layoutMargin = UIEdgeInsets(
+            top: CGFloat(source.canvasY),
+            left: CGFloat(source.canvasX),
+            bottom: 0,
+            right: 0
+        )
+        object.invalidateLayout()
+    }
+
+    @ScreenActor
+    private func addProgramAudioSource(_ source: StudioSource, track: UInt8) async {
+        let allURLs = source.assetPaths.compactMap(StudioMediaLibrary.url(for:))
+        let urls: [URL]
+        switch source.kind {
+        case .mediaGallery, .audioPlaylist:
+            urls = allURLs
+        default:
+            urls = Array(allURLs.prefix(1))
+        }
+        guard !urls.isEmpty else { return }
+
+        var settings = await programMixer.audioMixerSettings
+        var trackSettings = settings.tracks[track] ?? .init()
+        trackSettings.volume = Float(source.mediaVolume)
+        trackSettings.isMuted = source.isMediaMuted
+        settings.tracks[track] = trackSettings
+        await programMixer.setAudioMixerSettings(settings)
+
+        let player = ProgramAudioSourcePlayer(
+            mixer: programMixer,
+            track: track,
+            urls: urls,
+            loops: source.loopsMedia,
+            shuffles: source.shufflesPlaylist,
+            playbackRate: source.playbackRate
+        )
+        programAudioPlayers.append(player)
+        player.start()
     }
 
     @ScreenActor
@@ -565,6 +719,26 @@ final class CameraStudioModel: ObservableObject {
     }
 
     @ScreenActor
+    private func makeBlendedCanvasImage(
+        from fromFilename: String,
+        to toFilename: String,
+        size: CGSize,
+        progress: Double
+    ) -> CGImage? {
+        guard let fromURL = StudioMediaLibrary.url(for: fromFilename),
+              let toURL = StudioMediaLibrary.url(for: toFilename),
+              let fromImage = makeCanvasImage(from: fromURL, size: size),
+              let toImage = makeCanvasImage(from: toURL, size: size),
+              let context = makeBitmapContext(size: size) else { return nil }
+        let rect = CGRect(origin: .zero, size: size)
+        context.setAlpha(CGFloat(1 - progress))
+        context.draw(fromImage, in: rect)
+        context.setAlpha(CGFloat(progress))
+        context.draw(toImage, in: rect)
+        return context.makeImage()
+    }
+
+    @ScreenActor
     private func makeBitmapContext(size: CGSize) -> CGContext? {
         CGContext(
             data: nil,
@@ -586,6 +760,105 @@ final class CameraStudioModel: ObservableObject {
             return studioError.localizedDescription
         }
         return "No se pudo completar la operación: \(error.localizedDescription)"
+    }
+}
+
+private final class ProgramAudioSourcePlayer: @unchecked Sendable {
+    private let mixer: MediaMixer
+    private let track: UInt8
+    private let urls: [URL]
+    private let loops: Bool
+    private let shuffles: Bool
+    private let playbackRate: Double
+    private var task: Task<Void, Never>?
+
+    init(
+        mixer: MediaMixer,
+        track: UInt8,
+        urls: [URL],
+        loops: Bool,
+        shuffles: Bool,
+        playbackRate: Double
+    ) {
+        self.mixer = mixer
+        self.track = track
+        self.urls = urls
+        self.loops = loops
+        self.shuffles = shuffles
+        self.playbackRate = max(playbackRate, 0.25)
+    }
+
+    func start() {
+        stop()
+        task = Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.run()
+        }
+    }
+
+    func stop() {
+        task?.cancel()
+        task = nil
+    }
+
+    private func run() async {
+        guard !urls.isEmpty else { return }
+        var index = 0
+
+        while !Task.isCancelled {
+            guard await play(urls[index]) else { return }
+            guard !Task.isCancelled else { return }
+
+            if shuffles, urls.count > 1 {
+                index = urls.indices.filter { $0 != index }.randomElement() ?? index
+            } else if index + 1 < urls.count {
+                index += 1
+            } else if loops {
+                index = 0
+            } else {
+                return
+            }
+        }
+    }
+
+    private func play(_ url: URL) async -> Bool {
+        let asset = AVURLAsset(url: url)
+        guard let tracks = try? await asset.loadTracks(withMediaType: .audio),
+              let audioTrack = tracks.first,
+              let reader = try? AVAssetReader(asset: asset) else { return false }
+
+        let outputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
+        output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else { return false }
+        reader.add(output)
+        guard reader.startReading() else { return false }
+
+        var firstTimestamp: CMTime?
+        let startedAt = Date.timeIntervalSinceReferenceDate
+
+        while !Task.isCancelled, let sampleBuffer = output.copyNextSampleBuffer() {
+            let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            if firstTimestamp == nil { firstTimestamp = timestamp }
+            if let firstTimestamp {
+                let mediaElapsed = max(0, CMTimeGetSeconds(timestamp - firstTimestamp) / playbackRate)
+                let realElapsed = Date.timeIntervalSinceReferenceDate - startedAt
+                let delay = mediaElapsed - realElapsed
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+            }
+            guard !Task.isCancelled else {
+                reader.cancelReading()
+                return false
+            }
+            await mixer.append(sampleBuffer, track: track)
+        }
+        return reader.status == .completed
     }
 }
 
@@ -617,16 +890,22 @@ private struct ProgramImageGalleryState {
     let interval: TimeInterval
     var nextChange: TimeInterval
     let canvasSize: CGSize
+    let playbackMode: StudioGalleryPlaybackMode
+    let transitionDuration: TimeInterval
+    var isFinished: Bool
+    var transitionFromIndex: Int?
+    var transitionToIndex: Int?
+    var transitionStartedAt: TimeInterval?
 }
 
 private struct ProgramMediaState {
     let object: AssetScreenObject
     let urls: [URL]
     var index: Int
-    let interval: TimeInterval
-    var nextChange: TimeInterval
     let loops: Bool
     let isGallery: Bool
+    let shuffles: Bool
+    var isFinished: Bool
 }
 
 private extension UIColor {
