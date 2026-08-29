@@ -11,6 +11,7 @@ enum StudioSourceKind: String, CaseIterable, Codable, Identifiable, Sendable {
     case media
     case mediaGallery
     case audioOutput
+    case audioPlaylist
 
     var id: String { rawValue }
 
@@ -24,7 +25,8 @@ enum StudioSourceKind: String, CaseIterable, Codable, Identifiable, Sendable {
         case .imageGallery: return "Galería de imágenes"
         case .media: return "Multimedia"
         case .mediaGallery: return "Galería de multimedia"
-        case .audioOutput: return "Captura de salida de audio"
+        case .audioOutput: return "Captura de audio"
+        case .audioPlaylist: return "Lista de audio"
         }
     }
 
@@ -39,6 +41,53 @@ enum StudioSourceKind: String, CaseIterable, Codable, Identifiable, Sendable {
         case .media: return "play.rectangle.fill"
         case .mediaGallery: return "rectangle.stack.fill"
         case .audioOutput: return "speaker.wave.2.fill"
+        case .audioPlaylist: return "music.note.list"
+        }
+    }
+
+    var hasVisualContent: Bool {
+        switch self {
+        case .audioOutput, .audioPlaylist: return false
+        default: return true
+        }
+    }
+
+    var hasAudioTrack: Bool {
+        switch self {
+        case .media, .mediaGallery, .audioOutput, .audioPlaylist: return true
+        default: return false
+        }
+    }
+}
+
+enum StudioGalleryPlaybackMode: String, CaseIterable, Codable, Identifiable, Sendable {
+    case loop
+    case once
+    case random
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .loop: return "Bucle"
+        case .once: return "Una vez"
+        case .random: return "Aleatorio"
+        }
+    }
+}
+
+enum StudioVisibilityBehavior: String, CaseIterable, Codable, Identifiable, Sendable {
+    case restart
+    case pause
+    case continuePlaying
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .restart: return "Detener cuando no sea visible y reiniciar al mostrarse"
+        case .pause: return "Pausar cuando no sea visible y reanudar al mostrarse"
+        case .continuePlaying: return "Reproducir siempre, incluso cuando no sea visible"
         }
     }
 }
@@ -56,6 +105,17 @@ struct StudioSource: Identifiable, Codable, Equatable, Sendable {
     var loopsMedia: Bool
     var mediaVolume: Double
     var isMediaMuted: Bool
+    var canvasX: Double
+    var canvasY: Double
+    var canvasWidth: Double
+    var canvasHeight: Double
+    var galleryTransitionDuration: Double
+    var galleryPlaybackMode: StudioGalleryPlaybackMode
+    var shufflesPlaylist: Bool
+    var visibilityBehavior: StudioVisibilityBehavior
+    var restartWhenActive: Bool
+    var hideWhenFinished: Bool
+    var playbackRate: Double
 
     init(
         id: UUID = UUID(),
@@ -69,7 +129,18 @@ struct StudioSource: Identifiable, Codable, Equatable, Sendable {
         slideDuration: Double = 5,
         loopsMedia: Bool = true,
         mediaVolume: Double = 1,
-        isMediaMuted: Bool = false
+        isMediaMuted: Bool = false,
+        canvasX: Double = 0,
+        canvasY: Double = 0,
+        canvasWidth: Double = 1920,
+        canvasHeight: Double = 1080,
+        galleryTransitionDuration: Double = 0.7,
+        galleryPlaybackMode: StudioGalleryPlaybackMode = .loop,
+        shufflesPlaylist: Bool = false,
+        visibilityBehavior: StudioVisibilityBehavior = .restart,
+        restartWhenActive: Bool = true,
+        hideWhenFinished: Bool = false,
+        playbackRate: Double = 1
     ) {
         self.id = id
         self.name = name
@@ -83,11 +154,25 @@ struct StudioSource: Identifiable, Codable, Equatable, Sendable {
         self.loopsMedia = loopsMedia
         self.mediaVolume = mediaVolume
         self.isMediaMuted = isMediaMuted
+        self.canvasX = canvasX
+        self.canvasY = canvasY
+        self.canvasWidth = canvasWidth
+        self.canvasHeight = canvasHeight
+        self.galleryTransitionDuration = galleryTransitionDuration
+        self.galleryPlaybackMode = galleryPlaybackMode
+        self.shufflesPlaylist = shufflesPlaylist
+        self.visibilityBehavior = visibilityBehavior
+        self.restartWhenActive = restartWhenActive
+        self.hideWhenFinished = hideWhenFinished
+        self.playbackRate = playbackRate
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, kind, isVisible, isLocked, text, colorHex
         case assetPaths, slideDuration, loopsMedia, mediaVolume, isMediaMuted
+        case canvasX, canvasY, canvasWidth, canvasHeight
+        case galleryTransitionDuration, galleryPlaybackMode, shufflesPlaylist
+        case visibilityBehavior, restartWhenActive, hideWhenFinished, playbackRate
     }
 
     init(from decoder: Decoder) throws {
@@ -104,6 +189,17 @@ struct StudioSource: Identifiable, Codable, Equatable, Sendable {
         loopsMedia = try values.decodeIfPresent(Bool.self, forKey: .loopsMedia) ?? true
         mediaVolume = try values.decodeIfPresent(Double.self, forKey: .mediaVolume) ?? 1
         isMediaMuted = try values.decodeIfPresent(Bool.self, forKey: .isMediaMuted) ?? false
+        canvasX = try values.decodeIfPresent(Double.self, forKey: .canvasX) ?? 0
+        canvasY = try values.decodeIfPresent(Double.self, forKey: .canvasY) ?? 0
+        canvasWidth = try values.decodeIfPresent(Double.self, forKey: .canvasWidth) ?? 1920
+        canvasHeight = try values.decodeIfPresent(Double.self, forKey: .canvasHeight) ?? 1080
+        galleryTransitionDuration = try values.decodeIfPresent(Double.self, forKey: .galleryTransitionDuration) ?? 0.7
+        galleryPlaybackMode = try values.decodeIfPresent(StudioGalleryPlaybackMode.self, forKey: .galleryPlaybackMode) ?? .loop
+        shufflesPlaylist = try values.decodeIfPresent(Bool.self, forKey: .shufflesPlaylist) ?? false
+        visibilityBehavior = try values.decodeIfPresent(StudioVisibilityBehavior.self, forKey: .visibilityBehavior) ?? .restart
+        restartWhenActive = try values.decodeIfPresent(Bool.self, forKey: .restartWhenActive) ?? true
+        hideWhenFinished = try values.decodeIfPresent(Bool.self, forKey: .hideWhenFinished) ?? false
+        playbackRate = try values.decodeIfPresent(Double.self, forKey: .playbackRate) ?? 1
     }
 }
 
@@ -122,6 +218,7 @@ struct StudioScene: Identifiable, Codable, Equatable, Sendable {
 enum StudioAudioTrackKind: String, Codable, Sendable {
     case microphone
     case screen
+    case source
 }
 
 struct StudioAudioTrack: Identifiable, Codable, Equatable, Sendable {
@@ -130,19 +227,22 @@ struct StudioAudioTrack: Identifiable, Codable, Equatable, Sendable {
     var kind: StudioAudioTrackKind
     var volume: Double
     var isMuted: Bool
+    var sourceID: UUID?
 
     init(
         id: UUID = UUID(),
         name: String,
         kind: StudioAudioTrackKind,
         volume: Double = 0.8,
-        isMuted: Bool = false
+        isMuted: Bool = false,
+        sourceID: UUID? = nil
     ) {
         self.id = id
         self.name = name
         self.kind = kind
         self.volume = volume
         self.isMuted = isMuted
+        self.sourceID = sourceID
     }
 }
 
@@ -265,6 +365,22 @@ final class StudioStore: ObservableObject {
         return previewScene?.sources.first(where: { $0.id == selectedSourceID })
     }
 
+    var mixerAudioTracks: [StudioAudioTrack] {
+        let sourceTracks = (previewScene?.sources ?? [])
+            .filter { $0.kind.hasAudioTrack }
+            .map {
+                StudioAudioTrack(
+                    id: $0.id,
+                    name: $0.name,
+                    kind: .source,
+                    volume: $0.mediaVolume,
+                    isMuted: $0.isMediaMuted,
+                    sourceID: $0.id
+                )
+            }
+        return audioTracks + sourceTracks
+    }
+
     func selectPreviewScene(_ id: UUID) {
         guard let scene = scenes.first(where: { $0.id == id }) else { return }
         previewSceneID = scene.id
@@ -301,12 +417,13 @@ final class StudioStore: ObservableObject {
         save()
     }
 
-    func moveScene(_ sourceID: UUID, to targetID: UUID) {
+    func moveScene(_ sourceID: UUID, to targetID: UUID, after: Bool = false) {
         guard sourceID != targetID,
-              let sourceIndex = scenes.firstIndex(where: { $0.id == sourceID }),
-              let targetIndex = scenes.firstIndex(where: { $0.id == targetID }) else { return }
+              let sourceIndex = scenes.firstIndex(where: { $0.id == sourceID }) else { return }
         let scene = scenes.remove(at: sourceIndex)
-        scenes.insert(scene, at: min(targetIndex, scenes.count))
+        guard let updatedTargetIndex = scenes.firstIndex(where: { $0.id == targetID }) else { return }
+        let destination = min(updatedTargetIndex + (after ? 1 : 0), scenes.count)
+        scenes.insert(scene, at: destination)
         save()
     }
 
@@ -347,20 +464,36 @@ final class StudioStore: ObservableObject {
         updated.name = cleanedName.isEmpty ? source.kind.title : cleanedName
         updated.slideDuration = min(max(updated.slideDuration, 1), 60)
         updated.mediaVolume = min(max(updated.mediaVolume, 0), 1)
+        updated.canvasWidth = min(max(updated.canvasWidth, 1), 7680)
+        updated.canvasHeight = min(max(updated.canvasHeight, 1), 4320)
+        updated.canvasX = min(max(updated.canvasX, -7680), 7680)
+        updated.canvasY = min(max(updated.canvasY, -4320), 4320)
+        updated.galleryTransitionDuration = min(max(updated.galleryTransitionDuration, 0), 5)
+        updated.playbackRate = min(max(updated.playbackRate, 0.25), 2)
         scenes[location.scene].sources[location.source] = updated
         selectedSourceID = updated.id
         save()
     }
 
-    func moveSource(_ sourceID: UUID, to targetID: UUID) {
+    func moveSource(_ sourceID: UUID, to targetID: UUID, after: Bool = false) {
         guard sourceID != targetID,
               let sceneIndex = previewSceneIndex,
-              let sourceIndex = scenes[sceneIndex].sources.firstIndex(where: { $0.id == sourceID }),
-              let targetIndex = scenes[sceneIndex].sources.firstIndex(where: { $0.id == targetID }) else { return }
+              let sourceIndex = scenes[sceneIndex].sources.firstIndex(where: { $0.id == sourceID }) else { return }
         let source = scenes[sceneIndex].sources.remove(at: sourceIndex)
-        scenes[sceneIndex].sources.insert(source, at: min(targetIndex, scenes[sceneIndex].sources.count))
+        guard let updatedTargetIndex = scenes[sceneIndex].sources.firstIndex(where: { $0.id == targetID }) else { return }
+        let destination = min(updatedTargetIndex + (after ? 1 : 0), scenes[sceneIndex].sources.count)
+        scenes[sceneIndex].sources.insert(source, at: destination)
         selectedSourceID = source.id
         save()
+    }
+
+    func setSourcePosition(_ id: UUID, x: Double, y: Double, persist: Bool) {
+        guard let location = sourceLocation(id),
+              !scenes[location.scene].sources[location.source].isLocked else { return }
+        scenes[location.scene].sources[location.source].canvasX = x
+        scenes[location.scene].sources[location.source].canvasY = y
+        selectedSourceID = id
+        if persist { save() }
     }
 
     func deleteSelectedSource() {
@@ -400,20 +533,31 @@ final class StudioStore: ObservableObject {
     }
 
     func setAudioVolume(_ volume: Double, for trackID: UUID) {
-        guard let index = audioTracks.firstIndex(where: { $0.id == trackID }) else { return }
-        audioTracks[index].volume = min(max(volume, 0), 1)
-        if audioTracks[index].kind == .microphone {
-            cameraModel.setMicrophoneVolume(Float(audioTracks[index].volume))
+        let value = min(max(volume, 0), 1)
+        if let index = audioTracks.firstIndex(where: { $0.id == trackID }) {
+            audioTracks[index].volume = value
+            if audioTracks[index].kind == .microphone {
+                cameraModel.setMicrophoneVolume(Float(value))
+            }
+            save()
+            return
         }
+        guard let location = sourceLocation(trackID) else { return }
+        scenes[location.scene].sources[location.source].mediaVolume = value
         save()
     }
 
     func toggleAudioMute(_ trackID: UUID) {
-        guard let index = audioTracks.firstIndex(where: { $0.id == trackID }) else { return }
-        audioTracks[index].isMuted.toggle()
-        if audioTracks[index].kind == .microphone {
-            cameraModel.setMicrophoneMuted(audioTracks[index].isMuted)
+        if let index = audioTracks.firstIndex(where: { $0.id == trackID }) {
+            audioTracks[index].isMuted.toggle()
+            if audioTracks[index].kind == .microphone {
+                cameraModel.setMicrophoneMuted(audioTracks[index].isMuted)
+            }
+            save()
+            return
         }
+        guard let location = sourceLocation(trackID) else { return }
+        scenes[location.scene].sources[location.source].isMediaMuted.toggle()
         save()
     }
 
