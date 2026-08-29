@@ -146,7 +146,13 @@ struct StudioConsoleView: View {
             StudioCanvas(
                 scene: studio.previewScene,
                 cameraModel: studio.cameraModel,
-                canvasSize: configuration.outputSize
+                canvasSize: configuration.outputSize,
+                isInteractive: true,
+                selectedSourceID: studio.selectedSourceID,
+                onSelectSource: { studio.selectedSourceID = $0 },
+                onMoveSource: { id, x, y, finished in
+                    studio.setSourcePosition(id, x: x, y: y, persist: finished)
+                }
             )
         }
     }
@@ -272,28 +278,54 @@ struct StudioCanvas: View {
     let scene: StudioScene?
     let cameraModel: CameraStudioModel
     let canvasSize: CGSize
+    let isInteractive: Bool
+    let selectedSourceID: UUID?
+    let onSelectSource: ((UUID) -> Void)?
+    let onMoveSource: ((UUID, Double, Double, Bool) -> Void)?
+
+    init(
+        scene: StudioScene?,
+        cameraModel: CameraStudioModel,
+        canvasSize: CGSize,
+        isInteractive: Bool = false,
+        selectedSourceID: UUID? = nil,
+        onSelectSource: ((UUID) -> Void)? = nil,
+        onMoveSource: ((UUID, Double, Double, Bool) -> Void)? = nil
+    ) {
+        self.scene = scene
+        self.cameraModel = cameraModel
+        self.canvasSize = canvasSize
+        self.isInteractive = isInteractive
+        self.selectedSourceID = selectedSourceID
+        self.onSelectSource = onSelectSource
+        self.onMoveSource = onMoveSource
+    }
 
     var body: some View {
         GeometryReader { geometry in
-            ZStack {
+            let scaleX = geometry.size.width / max(canvasSize.width, 1)
+            let scaleY = geometry.size.height / max(canvasSize.height, 1)
+
+            ZStack(alignment: .topLeading) {
                 Color.black
 
                 if let scene {
                     ForEach(Array(scene.sources.reversed())) { source in
-                        if source.isVisible {
-                            sourceLayer(source, size: geometry.size)
+                        if source.isVisible, source.kind.hasVisualContent {
+                            transformedLayer(source, scaleX: scaleX, scaleY: scaleY)
                         }
                     }
                 }
 
-                if scene?.sources.contains(where: { $0.isVisible }) != true {
+                if scene?.sources.contains(where: { $0.isVisible && $0.kind.hasVisualContent }) != true {
                     VStack(spacing: 10) {
                         Image(systemName: "rectangle.slash")
                             .font(.largeTitle)
-                        Text("La escena no tiene fuentes visibles")
+                        Text("La escena no tiene fuentes visuales")
                             .font(.caption)
                     }
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
@@ -301,6 +333,35 @@ struct StudioCanvas: View {
         }
         .background(.black)
         .aspectRatio(canvasSize.width / max(canvasSize.height, 1), contentMode: .fit)
+    }
+
+    private func transformedLayer(_ source: StudioSource, scaleX: CGFloat, scaleY: CGFloat) -> some View {
+        let width = max(1, CGFloat(source.canvasWidth) * scaleX)
+        let height = max(1, CGFloat(source.canvasHeight) * scaleY)
+        let x = CGFloat(source.canvasX) * scaleX
+        let y = CGFloat(source.canvasY) * scaleY
+
+        return sourceLayer(source, size: CGSize(width: width, height: height))
+            .frame(width: width, height: height)
+            .position(x: x + width / 2, y: y + height / 2)
+            .overlay {
+                if isInteractive, selectedSourceID == source.id {
+                    Rectangle()
+                        .stroke(source.isLocked ? Color.orange : Color.green, lineWidth: 2)
+                        .allowsHitTesting(false)
+                }
+            }
+            .modifier(
+                SourceInteractionModifier(
+                    source: source,
+                    scaleX: scaleX,
+                    scaleY: scaleY,
+                    canvasSize: canvasSize,
+                    enabled: isInteractive,
+                    onSelect: onSelectSource,
+                    onMove: onMoveSource
+                )
+            )
     }
 
     @ViewBuilder
@@ -328,7 +389,7 @@ struct StudioCanvas: View {
             }
         case .text:
             Text(source.text)
-                .font(.system(size: max(20, min(size.width, size.height) * 0.09), weight: .bold))
+                .font(.system(size: max(12, min(size.width, size.height) * 0.09), weight: .bold))
                 .foregroundStyle(.white)
                 .multilineTextAlignment(.center)
                 .shadow(color: .black.opacity(0.8), radius: 4, y: 2)
@@ -338,13 +399,64 @@ struct StudioCanvas: View {
             Color(studioHex: source.colorHex)
         case .image, .imageGallery:
             StudioImageSourceLayer(source: source)
-                .frame(width: size.width, height: size.height)
         case .media, .mediaGallery:
             StudioMediaSourceLayer(source: source)
-                .frame(width: size.width, height: size.height)
-        case .audioOutput:
+        case .audioOutput, .audioPlaylist:
             EmptyView()
         }
+    }
+}
+
+private struct SourceInteractionModifier: ViewModifier {
+    let source: StudioSource
+    let scaleX: CGFloat
+    let scaleY: CGFloat
+    let canvasSize: CGSize
+    let enabled: Bool
+    let onSelect: ((UUID) -> Void)?
+    let onMove: ((UUID, Double, Double, Bool) -> Void)?
+
+    @State private var dragOrigin: CGPoint?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .contentShape(Rectangle())
+                .onTapGesture { onSelect?(source.id) }
+                .gesture(
+                    DragGesture(minimumDistance: 2)
+                        .onChanged { value in
+                            guard !source.isLocked else { return }
+                            onSelect?(source.id)
+                            let origin = dragOrigin ?? CGPoint(x: source.canvasX, y: source.canvasY)
+                            if dragOrigin == nil { dragOrigin = origin }
+                            let position = clampedPosition(origin: origin, translation: value.translation)
+                            onMove?(source.id, position.x, position.y, false)
+                        }
+                        .onEnded { value in
+                            guard !source.isLocked else { return }
+                            let origin = dragOrigin ?? CGPoint(x: source.canvasX, y: source.canvasY)
+                            let position = clampedPosition(origin: origin, translation: value.translation)
+                            onMove?(source.id, position.x, position.y, true)
+                            dragOrigin = nil
+                        }
+                )
+        } else {
+            content
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func clampedPosition(origin: CGPoint, translation: CGSize) -> (x: Double, y: Double) {
+        let proposedX = Double(origin.x + translation.width / max(scaleX, 0.0001))
+        let proposedY = Double(origin.y + translation.height / max(scaleY, 0.0001))
+        let maximumX = max(0, Double(canvasSize.width) - source.canvasWidth)
+        let maximumY = max(0, Double(canvasSize.height) - source.canvasHeight)
+        return (
+            min(max(proposedX, 0), maximumX),
+            min(max(proposedY, 0), maximumY)
+        )
     }
 }
 
@@ -353,30 +465,67 @@ private struct StudioImageSourceLayer: View {
 
     var body: some View {
         if source.kind == .imageGallery, source.assetPaths.count > 1 {
-            TimelineView(.periodic(from: .now, by: max(source.slideDuration, 1))) { context in
-                image(for: galleryIndex(at: context.date))
-            }
+            StudioImageGalleryPlayer(source: source)
         } else {
-            image(for: 0)
+            image(for: source.assetPaths.first)
         }
     }
 
     @ViewBuilder
-    private func image(for index: Int) -> some View {
-        if source.assetPaths.indices.contains(index),
-           let url = StudioMediaLibrary.url(for: source.assetPaths[index]),
+    private func image(for filename: String?) -> some View {
+        if let filename,
+           let url = StudioMediaLibrary.url(for: filename),
            let image = UIImage(contentsOfFile: url.path) {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFit()
         } else {
-            sourcePlaceholder(icon: source.kind.icon, title: "Elige imágenes en Ajustes de fuente")
+            sourcePlaceholder(icon: source.kind.icon, title: "Elige imágenes en Propiedades")
+        }
+    }
+}
+
+private struct StudioImageGalleryPlayer: View {
+    let source: StudioSource
+    @State private var index = 0
+
+    var body: some View {
+        ZStack {
+            if source.assetPaths.indices.contains(index),
+               let url = StudioMediaLibrary.url(for: source.assetPaths[index]),
+               let image = UIImage(contentsOfFile: url.path) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .id(index)
+                    .transition(.opacity)
+            } else {
+                sourcePlaceholder(icon: source.kind.icon, title: "Elige imágenes en Propiedades")
+            }
+        }
+        .task(id: source.assetPaths) {
+            index = 0
+            while !Task.isCancelled, source.assetPaths.count > 1 {
+                try? await Task.sleep(nanoseconds: UInt64(max(source.slideDuration, 1) * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                guard let next = nextIndex() else { return }
+                withAnimation(.easeInOut(duration: source.galleryTransitionDuration)) {
+                    index = next
+                }
+            }
         }
     }
 
-    private func galleryIndex(at date: Date) -> Int {
-        guard !source.assetPaths.isEmpty else { return 0 }
-        return Int(date.timeIntervalSinceReferenceDate / max(source.slideDuration, 1)) % source.assetPaths.count
+    private func nextIndex() -> Int? {
+        switch source.galleryPlaybackMode {
+        case .loop:
+            return (index + 1) % source.assetPaths.count
+        case .once:
+            return index + 1 < source.assetPaths.count ? index + 1 : nil
+        case .random:
+            let candidates = source.assetPaths.indices.filter { $0 != index }
+            return candidates.randomElement() ?? index
+        }
     }
 }
 
@@ -385,61 +534,118 @@ private struct StudioMediaSourceLayer: View {
 
     var body: some View {
         if source.kind == .mediaGallery, source.assetPaths.count > 1 {
-            TimelineView(.periodic(from: .now, by: max(source.slideDuration, 1))) { context in
-                player(for: galleryIndex(at: context.date))
-            }
-        } else {
-            player(for: 0)
-        }
-    }
-
-    @ViewBuilder
-    private func player(for index: Int) -> some View {
-        if source.assetPaths.indices.contains(index),
-           let url = StudioMediaLibrary.url(for: source.assetPaths[index]) {
+            StudioMediaPlaylistPlayer(source: source)
+        } else if let filename = source.assetPaths.first,
+                  let url = StudioMediaLibrary.url(for: filename) {
             StudioVideoPlayer(
                 url: url,
                 loops: source.loopsMedia,
-                isMuted: source.isMediaMuted,
-                volume: Float(source.mediaVolume)
+                hideWhenFinished: source.hideWhenFinished,
+                playbackRate: Float(source.playbackRate)
             )
         } else {
-            sourcePlaceholder(icon: source.kind.icon, title: "Elige videos en Ajustes de fuente")
+            sourcePlaceholder(icon: source.kind.icon, title: "Elige videos en Propiedades")
         }
-    }
-
-    private func galleryIndex(at date: Date) -> Int {
-        guard !source.assetPaths.isEmpty else { return 0 }
-        return Int(date.timeIntervalSinceReferenceDate / max(source.slideDuration, 1)) % source.assetPaths.count
     }
 }
 
 private struct StudioVideoPlayer: View {
     let url: URL
     let loops: Bool
-    let isMuted: Bool
-    let volume: Float
+    let hideWhenFinished: Bool
+    let playbackRate: Float
 
     @State private var player = AVPlayer()
+    @State private var isFinished = false
 
     var body: some View {
-        VideoPlayer(player: player)
-            .task(id: url) {
-                player.replaceCurrentItem(with: AVPlayerItem(url: url))
-                player.isMuted = isMuted
-                player.volume = volume
-                player.play()
+        Group {
+            if isFinished, hideWhenFinished {
+                Color.clear
+            } else {
+                VideoPlayer(player: player)
             }
-            .onChange(of: isMuted) { _, muted in player.isMuted = muted }
-            .onChange(of: volume) { _, newVolume in player.volume = newVolume }
-            .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
-                guard loops,
-                      let endedItem = notification.object as? AVPlayerItem,
-                      endedItem === player.currentItem else { return }
+        }
+        .task(id: url) {
+            isFinished = false
+            player.replaceCurrentItem(with: AVPlayerItem(url: url))
+            player.isMuted = true
+            player.playImmediately(atRate: playbackRate)
+        }
+        .onChange(of: playbackRate) { _, rate in player.rate = rate }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+            guard let endedItem = notification.object as? AVPlayerItem,
+                  endedItem === player.currentItem else { return }
+            if loops {
                 player.seek(to: .zero)
-                player.play()
+                player.playImmediately(atRate: playbackRate)
+            } else {
+                isFinished = true
             }
-            .onDisappear { player.pause() }
+        }
+        .onDisappear { player.pause() }
+    }
+}
+
+private struct StudioMediaPlaylistPlayer: View {
+    let source: StudioSource
+    @State private var player = AVPlayer()
+    @State private var index = 0
+    @State private var isFinished = false
+
+    var body: some View {
+        Group {
+            if isFinished, source.hideWhenFinished {
+                Color.clear
+            } else {
+                VideoPlayer(player: player)
+            }
+        }
+        .task(id: source.assetPaths) {
+            index = 0
+            isFinished = false
+            loadCurrentItem()
+        }
+        .onChange(of: source.playbackRate) { _, rate in player.rate = Float(rate) }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+            guard let endedItem = notification.object as? AVPlayerItem,
+                  endedItem === player.currentItem else { return }
+            advance()
+        }
+        .onDisappear {
+            switch source.visibilityBehavior {
+            case .restart:
+                player.pause()
+                player.seek(to: .zero)
+            case .pause:
+                player.pause()
+            case .continuePlaying:
+                break
+            }
+        }
+    }
+
+    private func loadCurrentItem() {
+        guard source.assetPaths.indices.contains(index),
+              let url = StudioMediaLibrary.url(for: source.assetPaths[index]) else { return }
+        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        player.isMuted = true
+        player.playImmediately(atRate: Float(source.playbackRate))
+    }
+
+    private func advance() {
+        if source.shufflesPlaylist, source.assetPaths.count > 1 {
+            index = source.assetPaths.indices.filter { $0 != index }.randomElement() ?? index
+            loadCurrentItem()
+            return
+        }
+        let isLast = index >= source.assetPaths.count - 1
+        if isLast, !source.loopsMedia {
+            isFinished = true
+            return
+        }
+        index = (index + 1) % max(source.assetPaths.count, 1)
+        loadCurrentItem()
     }
 }
 
@@ -456,7 +662,6 @@ private func sourcePlaceholder(icon: String, title: String) -> some View {
         .foregroundStyle(.secondary)
     }
 }
-
 struct ExternalProgramView: View {
     let sessionID: String
     @EnvironmentObject private var studio: StudioStore
@@ -612,34 +817,31 @@ private struct ScenesPanel: View {
             ScrollView {
                 LazyVStack(spacing: 3) {
                     ForEach(studio.scenes) { scene in
-                        Button {
-                            studio.selectPreviewScene(scene.id)
-                        } label: {
-                            HStack(spacing: 7) {
-                                Circle()
-                                    .fill(scene.id == studio.programSceneID ? Color.red : Color.clear)
-                                    .frame(width: 7, height: 7)
-                                Text(scene.name)
-                                    .lineLimit(1)
-                                Spacer()
-                                Image(systemName: "line.3.horizontal")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                if scene.id == studio.previewSceneID {
-                                    Image(systemName: "eye.fill")
-                                        .foregroundStyle(.green)
-                                }
+                        HStack(spacing: 7) {
+                            Circle()
+                                .fill(scene.id == studio.programSceneID ? Color.red : Color.clear)
+                                .frame(width: 7, height: 7)
+                            Text(scene.name)
+                                .lineLimit(1)
+                            Spacer()
+                            Image(systemName: "line.3.horizontal")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            if scene.id == studio.previewSceneID {
+                                Image(systemName: "eye.fill")
+                                    .foregroundStyle(.green)
                             }
-                            .padding(.horizontal, 8)
-                            .frame(height: 32)
-                            .background(
-                                scene.id == studio.previewSceneID
-                                    ? Color.blue.opacity(0.7)
-                                    : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 5)
-                            )
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal, 8)
+                        .frame(height: 36)
+                        .contentShape(Rectangle())
+                        .onTapGesture { studio.selectPreviewScene(scene.id) }
+                        .background(
+                            scene.id == studio.previewSceneID
+                                ? Color.blue.opacity(0.7)
+                                : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 5)
+                        )
                         .contextMenu {
                             Button {
                                 editingScene = scene
@@ -648,10 +850,10 @@ private struct ScenesPanel: View {
                             }
                         }
                         .draggable(scene.id.uuidString)
-                        .dropDestination(for: String.self) { items, _ in
+                        .dropDestination(for: String.self) { items, location in
                             guard let rawID = items.first,
                                   let sourceID = UUID(uuidString: rawID) else { return false }
-                            studio.moveScene(sourceID, to: scene.id)
+                            studio.moveScene(sourceID, to: scene.id, after: location.y > 18)
                             return true
                         }
                     }
@@ -686,22 +888,18 @@ private struct SourcesPanel: View {
                 LazyVStack(spacing: 3) {
                     ForEach(studio.previewScene?.sources ?? []) { source in
                         HStack(spacing: 5) {
-                            Button {
-                                studio.selectedSourceID = source.id
-                            } label: {
-                                HStack(spacing: 7) {
-                                    Image(systemName: source.kind.icon)
-                                        .frame(width: 18)
-                                    Text(source.name)
-                                        .lineLimit(1)
-                                    Spacer(minLength: 0)
-                                    Image(systemName: "line.3.horizontal")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                .contentShape(Rectangle())
+                            HStack(spacing: 7) {
+                                Image(systemName: source.kind.icon)
+                                    .frame(width: 18)
+                                Text(source.name)
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                Image(systemName: "line.3.horizontal")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.plain)
+                            .contentShape(Rectangle())
+                            .onTapGesture { studio.selectedSourceID = source.id }
 
                             Button {
                                 studio.toggleSourceVisibility(source.id)
@@ -722,7 +920,7 @@ private struct SourcesPanel: View {
                             .accessibilityLabel(source.isLocked ? "Desbloquear fuente" : "Bloquear fuente")
                         }
                         .padding(.horizontal, 8)
-                        .frame(height: 32)
+                        .frame(height: 36)
                         .background(
                             studio.selectedSourceID == source.id
                                 ? Color.blue.opacity(0.7)
@@ -738,10 +936,10 @@ private struct SourcesPanel: View {
                             }
                         }
                         .draggable(source.id.uuidString)
-                        .dropDestination(for: String.self) { items, _ in
+                        .dropDestination(for: String.self) { items, location in
                             guard let rawID = items.first,
                                   let sourceID = UUID(uuidString: rawID) else { return false }
-                            studio.moveSource(sourceID, to: source.id)
+                            studio.moveSource(sourceID, to: source.id, after: location.y > 18)
                             return true
                         }
                     }
@@ -790,7 +988,7 @@ private struct AudioMixerPanel: View {
     var body: some View {
         DockPanel(title: "Mezclador de audio", icon: "slider.vertical.3") {
             VStack(spacing: 8) {
-                ForEach(studio.audioTracks) { track in
+                ForEach(studio.mixerAudioTracks) { track in
                     VStack(spacing: 5) {
                         HStack {
                             Text(track.name)
@@ -831,7 +1029,7 @@ private struct AudioMixerPanel: View {
             .padding(7)
         } footer: {
             HStack {
-                Label("2 pistas", systemImage: "waveform")
+                Label("\(studio.mixerAudioTracks.count) pistas", systemImage: "waveform")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
